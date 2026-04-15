@@ -2,6 +2,7 @@ import sys
 import json
 import asyncio
 import threading
+import math
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
@@ -13,8 +14,9 @@ class FrequencyRuler(QWidget):
     def __init__(self):
         super().__init__()
         self.setFixedHeight(30)
-        self.start_f = 88.0 # Lagras nu i MHz internt för enkelhet
+        self.start_f = 88.0
         self.stop_f = 108.0
+        self.margin = 40 # Utrymme på sidorna för labels
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
@@ -26,19 +28,35 @@ class FrequencyRuler(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor(30, 30, 30))
         
-        width = self.width()
+        width = self.width() - (2 * self.margin)
         painter.setPen(QPen(Qt.white, 1))
         painter.setFont(QFont("Arial", 8))
 
-        num_ticks = 10
-        for i in range(num_ticks + 1):
-            x = int(i * (width / num_ticks))
-            freq_mhz = self.start_f + (i / num_ticks) * (self.stop_f - self.start_f)
+        # Beräkna vilka hela MHz som finns inom intervallet
+        first_mhz = math.ceil(self.start_f)
+        last_mhz = math.floor(self.stop_f)
+        
+        f_range = self.stop_f - self.start_f
+        if f_range <= 0: return
+
+        # Rita markeringar för varje hel MHz
+        for mhz in range(first_mhz, last_mhz + 1):
+            # Beräkna position relativt start/stopp
+            relative_pos = (mhz - self.start_f) / f_range
+            x = int(self.margin + (relative_pos * width))
             
+            # Rita linje
             painter.drawLine(x, 20, x, 30)
-            text = f"{freq_mhz:.1f} MHz"
-            rect = QRect(x - 30, 0, 60, 20)
+            
+            # Rita text
+            text = f"{mhz}"
+            rect = QRect(x - 20, 0, 40, 20)
             painter.drawText(rect, Qt.AlignCenter, text)
+            
+        # Rita små markeringar för start och stopp vid kanterna om de inte är hela MHz
+        painter.setPen(QPen(QColor(150, 150, 150), 1))
+        painter.drawLine(self.margin, 25, self.margin, 30)
+        painter.drawLine(self.width() - self.margin, 25, self.width() - self.margin, 30)
 
 class WaterfallWidget(QWidget):
     def __init__(self):
@@ -47,6 +65,7 @@ class WaterfallWidget(QWidget):
         self.image = QImage(1024, 1000, QImage.Format_RGB32)
         self.image.fill(Qt.black)
         self.current_row = 0
+        self.margin = 40 # Måste matcha FrequencyRuler
 
     def add_line(self, data_bytes, threshold):
         width = len(data_bytes)
@@ -64,71 +83,76 @@ class WaterfallWidget(QWidget):
             else:
                 norm_val = int(((val - threshold) / (255 - threshold)) * 255)
                 norm_val = max(0, min(255, norm_val))
-                self.image.setPixelColor(x, self.current_row, QColor(norm_val, int(norm_val*0.4), 255-norm_val))
+                # Snyggare färgskala
+                self.image.setPixelColor(x, self.current_row, QColor(norm_val, int(norm_val*0.3), 255-norm_val))
 
         self.current_row = (self.current_row + 1) % self.image.height()
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.drawImage(self.rect(), self.image)
+        # Rita vattenfallet inom marginalerna
+        display_rect = QRect(self.margin, 0, self.width() - 2 * self.margin, self.height())
+        painter.drawImage(display_rect, self.image)
+        
+        # Rita en ram runt vattenfallet
+        painter.setPen(QColor(60, 60, 60))
+        painter.drawRect(display_rect)
 
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SDR MHz Scanner")
+        self.setWindowTitle("SDR Professional Visualizer")
         self.resize(1300, 850)
         self.setStyleSheet("background-color: #1e1e1e; color: white;")
         
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(0, 5, 0, 0)
-        main_layout.setSpacing(2)
+        main_layout.setContentsMargins(0, 10, 0, 10)
+        main_layout.setSpacing(0)
 
         # --- KONTROLLRAD ---
         ctrl_layout = QHBoxLayout()
-        ctrl_layout.setContentsMargins(10, 0, 10, 0)
+        ctrl_layout.setContentsMargins(50, 0, 50, 10) # Matcha marginalen ungefär
         
-        # MHz Inputs
         self.start_freq = QLineEdit("88.0")
         self.stop_freq = QLineEdit("108.0")
         for e in [self.start_freq, self.stop_freq]: e.setFixedWidth(70)
         
         self.fft_combo = QComboBox()
-        self.fft_combo.addItems(["512", "1024", "2048", "4096"])
+        self.fft_combo.addItems(["256","512", "1024", "2048", "4096"])
         self.fft_combo.setCurrentText("1024")
         
         self.step_input = QLineEdit("1.5")
         self.step_input.setFixedWidth(40)
         
-        # Noise Threshold med värde-label
         self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(0, 255) 
-        self.threshold_slider.setValue(40)
+        self.threshold_slider.setRange(0, 255); self.threshold_slider.setValue(45)
         self.threshold_slider.setFixedWidth(150)
-        self.threshold_val_label = QLabel("40") # Denna visar siffran
+        self.threshold_val_label = QLabel("45")
         self.threshold_val_label.setFixedWidth(30)
-        self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
+        self.threshold_slider.valueChanged.connect(lambda v: self.threshold_val_label.setText(str(v)))
 
         self.btn_update = QPushButton("Svep")
-        self.btn_update.setStyleSheet("background-color: #0078d7; font-weight: bold; padding: 4px;")
+        self.btn_update.setStyleSheet("background-color: #0078d7; font-weight: bold; padding: 5px 15px;")
 
         ctrl_layout.addWidget(QLabel("Start (MHz):"))
         ctrl_layout.addWidget(self.start_freq)
-        ctrl_layout.addWidget(QLabel("Stopp (MHz):"))
+        ctrl_layout.addWidget(QLabel("Stopp:"))
         ctrl_layout.addWidget(self.stop_freq)
         ctrl_layout.addWidget(QLabel("FFT:"))
         ctrl_layout.addWidget(self.fft_combo)
         ctrl_layout.addWidget(QLabel("Steg:"))
         ctrl_layout.addWidget(self.step_input)
-        ctrl_layout.addSpacing(15)
-        ctrl_layout.addWidget(QLabel("Noise Floor:"))
+        ctrl_layout.addSpacing(20)
+        ctrl_layout.addWidget(QLabel("Brus:"))
         ctrl_layout.addWidget(self.threshold_slider)
-        ctrl_layout.addWidget(self.threshold_val_label) # Visa siffran här
+        ctrl_layout.addWidget(self.threshold_val_label)
         ctrl_layout.addStretch()
         ctrl_layout.addWidget(self.btn_update)
 
+        # --- VISUALISERING ---
         self.ruler = FrequencyRuler()
         self.waterfall = WaterfallWidget()
         
@@ -146,9 +170,6 @@ class MainWindow(QMainWindow):
         self.loop = asyncio.new_event_loop()
         self.ws = None
         threading.Thread(target=self.start_async_loop, daemon=True).start()
-
-    def on_threshold_changed(self, val):
-        self.threshold_val_label.setText(str(val))
 
     def start_async_loop(self):
         asyncio.set_event_loop(self.loop)
@@ -168,23 +189,18 @@ class MainWindow(QMainWindow):
 
     def send_settings(self):
         try:
-            # Konvertera MHz till Hz för servern
-            start_mhz = float(self.start_freq.text().replace(',', '.'))
-            stop_mhz = float(self.stop_freq.text().replace(',', '.'))
-            
-            # Uppdatera linjalen i MHz
-            self.ruler.set_range(start_mhz, stop_mhz)
-            
+            s_mhz = float(self.start_freq.text().replace(',', '.'))
+            e_mhz = float(self.stop_freq.text().replace(',', '.'))
+            self.ruler.set_range(s_mhz, e_mhz)
             if self.ws:
                 msg = json.dumps({
-                    "start": start_mhz * 1e6, # Här sker konverteringen
-                    "stop": stop_mhz * 1e6,
+                    "start": s_mhz * 1e6,
+                    "stop": e_mhz * 1e6,
                     "fft_size": int(self.fft_combo.currentText()),
                     "step_size": float(self.step_input.text().replace(',', '.')) * 1e6
                 })
                 asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
-        except Exception as ex:
-            print(f"Input Error: {ex}")
+        except Exception as ex: print(ex)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
