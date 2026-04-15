@@ -105,7 +105,7 @@ class MainWindow(QMainWindow):
         for e in [self.start_freq, self.stop_freq]: e.setFixedWidth(90)
         
         self.fft_combo = QComboBox()
-        self.fft_combo.addItems(["512", "1024", "2048", "4096"])
+        self.fft_combo.addItems(["128","256","512", "1024", "2048", "4096"])
         self.fft_combo.setCurrentText("1024")
         
         self.step_input = QLineEdit("1.5")
@@ -159,7 +159,7 @@ class MainWindow(QMainWindow):
     async def network_handler(self):
         while True:
             try:
-                async with websockets.connect("ws://localhost:8765") as ws:
+                async with websockets.connect("ws://192.168.128.82:8765") as ws:
                     self.ws = ws
                     while True:
                         data = await ws.recv()
