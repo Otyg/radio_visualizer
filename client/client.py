@@ -109,7 +109,7 @@ class MainWindow(QMainWindow):
     async def network_handler(self):
         while True:
             try:
-                async with websockets.connect("ws://localhost:8765") as ws:
+                async with websockets.connect("ws://192.168.128.82:8765") as ws:
                     self.ws = ws
                     while True:
                         data = await ws.recv()
