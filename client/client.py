@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         
         container = QWidget()
         container.setLayout(main_layout)
-        setCentralWidget(container)
+        self.setCentralWidget(container)
         
         self.btn_connect.clicked.connect(self.send_settings)
         self.data_received.connect(self.waterfall.add_line)
