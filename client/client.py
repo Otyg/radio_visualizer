@@ -112,6 +112,7 @@ class SpectrumLineWidget(QWidget):
         self.start_f = 88.0
         self.stop_f = 108.0
         self.latest_data = b""
+        self.max_hold_data = None
         self.threshold = 45
 
     def set_range(self, start_mhz, stop_mhz):
@@ -121,6 +122,16 @@ class SpectrumLineWidget(QWidget):
 
     def set_data(self, data_bytes):
         self.latest_data = data_bytes
+        if not data_bytes:
+            self.update()
+            return
+
+        if self.max_hold_data is None or len(self.max_hold_data) != len(data_bytes):
+            self.max_hold_data = bytearray(data_bytes)
+        else:
+            for i, value in enumerate(data_bytes):
+                if value > self.max_hold_data[i]:
+                    self.max_hold_data[i] = value
         self.update()
 
     def set_threshold(self, threshold):
@@ -169,6 +180,20 @@ class SpectrumLineWidget(QWidget):
             p0 = points[i]
             p1 = points[i + 1]
             painter.drawLine(p0[0], p0[1], p1[0], p1[1])
+
+        if self.max_hold_data and len(self.max_hold_data) == width:
+            max_points = []
+            for i, val in enumerate(self.max_hold_data):
+                x = int(draw_rect.left() + i * x_step)
+                norm = max(0.0, min(1.0, val / 255.0))
+                y = int(draw_rect.bottom() - norm * draw_rect.height())
+                max_points.append((x, y))
+
+            painter.setPen(QPen(QColor(255, 180, 40), 1.5, Qt.DashLine))
+            for i in range(len(max_points) - 1):
+                p0 = max_points[i]
+                p1 = max_points[i + 1]
+                painter.drawLine(p0[0], p0[1], p1[0], p1[1])
 
         y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
         painter.setPen(QPen(QColor(255, 60, 60), 1.5))

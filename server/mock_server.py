@@ -560,6 +560,9 @@ class MockServerWindow(QMainWindow):
             row.set_values(tx)
         else:
             row.freq.setValue(95.0 + 0.7 * len(self.tx_rows))
+            # Se till att nya sändare startar tydligt över aktuellt brusgolv.
+            suggested_power = min(20, max(-110, int(self.noise_slider.value()) + 25))
+            row.power.setValue(suggested_power)
 
         self.tx_rows.append(row)
         self.tx_rows_layout.insertWidget(self.tx_rows_layout.count() - 1, row)
