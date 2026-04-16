@@ -32,7 +32,12 @@ class TransmitterConfig:
     enabled: bool = True
     base_freq_hz: float = 98e6
     modulation: str = "FM"
-    power_db: float = -55.0
+    signal_type: str = "Continuous"
+    power_db: float = 35.0
+    pulse_on_min_ms: float = 120.0
+    pulse_on_max_ms: float = 350.0
+    pulse_off_min_ms: float = 180.0
+    pulse_off_max_ms: float = 700.0
 
 
 @dataclass
@@ -47,7 +52,7 @@ class MockConfig:
     frame_interval_s: float = 0.06
     transmitters: list[TransmitterConfig] = field(
         default_factory=lambda: [
-            TransmitterConfig(tx_id=1, enabled=True, base_freq_hz=96.8e6, modulation="FM", power_db=-55.0)
+            TransmitterConfig(tx_id=1, enabled=True, base_freq_hz=96.8e6, modulation="FM", power_db=35.0)
         ]
     )
 
@@ -92,6 +97,7 @@ class MockSpectrumEngine:
         self.rng = np.random.default_rng()
         self._phase_by_tx: dict[int, float] = {}
         self._phase_step_by_tx: dict[int, float] = {}
+        self._pulse_state_by_tx: dict[int, dict[str, int | bool]] = {}
 
     @staticmethod
     def _bins_per_step(cfg: MockConfig) -> int:
@@ -133,6 +139,53 @@ class MockSpectrumEngine:
         shape = np.exp(-0.5 * ((x - center_bin) / sigma_bins) ** 2)
         spectrum += gain_db * shape
 
+    def _random_frames_from_ms(self, min_ms: float, max_ms: float, frame_interval_s: float) -> int:
+        lo_ms = min(min_ms, max_ms)
+        hi_ms = max(min_ms, max_ms)
+        interval_s = max(1e-4, frame_interval_s)
+        lo_frames = max(1, int(round((max(1.0, lo_ms) / 1000.0) / interval_s)))
+        hi_frames = max(lo_frames, int(round((max(1.0, hi_ms) / 1000.0) / interval_s)))
+        return int(self.rng.integers(lo_frames, hi_frames + 1))
+
+    def _pulse_gate(self, tx: TransmitterConfig, cfg: MockConfig) -> float:
+        if tx.signal_type.upper() != "PULSE":
+            self._pulse_state_by_tx.pop(tx.tx_id, None)
+            return 1.0
+
+        state = self._pulse_state_by_tx.get(tx.tx_id)
+        if state is None:
+            state = {
+                "is_on": True,
+                "frames_left": self._random_frames_from_ms(
+                    tx.pulse_on_min_ms, tx.pulse_on_max_ms, cfg.frame_interval_s
+                ),
+            }
+            self._pulse_state_by_tx[tx.tx_id] = state
+
+        frames_left = int(state["frames_left"])
+        is_on = bool(state["is_on"])
+
+        if frames_left <= 0:
+            is_on = not is_on
+            if is_on:
+                frames_left = self._random_frames_from_ms(
+                    tx.pulse_on_min_ms, tx.pulse_on_max_ms, cfg.frame_interval_s
+                )
+            else:
+                frames_left = self._random_frames_from_ms(
+                    tx.pulse_off_min_ms, tx.pulse_off_max_ms, cfg.frame_interval_s
+                )
+
+        state["is_on"] = is_on
+        state["frames_left"] = frames_left - 1
+
+        if not is_on:
+            return 0.0
+
+        # Slumpmassig pulsamplitud inom varje aktiv period.
+        pulse_input = float(self.rng.normal(1.0, 0.22))
+        return float(np.clip(pulse_input, 0.25, 1.7))
+
     def _apply_transmitter(self, spectrum: np.ndarray, cfg: MockConfig, tx: TransmitterConfig) -> None:
         if not tx.enabled:
             return
@@ -141,10 +194,14 @@ class MockSpectrumEngine:
             return
 
         hz_per_bin = span_hz / max(1, spectrum.size)
-        # Sändarstyrkan styr amplituden pa carriern direkt relativt brusgolvet.
-        carrier_gain = max(0.0, tx.power_db - cfg.noise_floor_db)
+        # Sändarstyrkan anges relativt bakgrundsbruset (dB over brusgolvet).
+        carrier_gain = max(0.0, tx.power_db)
         if carrier_gain <= 0.0:
             return
+        pulse_gate = self._pulse_gate(tx, cfg)
+        if pulse_gate <= 0.0:
+            return
+        carrier_gain *= pulse_gate
         mod_signal = self._next_mod_signal(tx.tx_id)
 
         base_bin = (tx.base_freq_hz - cfg.start) / hz_per_bin
@@ -161,18 +218,38 @@ class MockSpectrumEngine:
             self._add_gaussian(spectrum, base_bin - 2.0 * side_offset, 1.4, side_gain_2)
             self._add_gaussian(spectrum, base_bin + 2.0 * side_offset, 1.4, side_gain_2)
         else:
-            freq_dev_hz = 0.05 * cfg.step_size * mod_signal
+            fm_max_dev_hz = 75e3
+            # Mjuk deviation-begransning: kontinuerlig signal aven om insignalen vill overstyra.
+            raw_dev_hz = 120e3 * mod_signal
+            freq_dev_hz = float(fm_max_dev_hz * np.tanh(raw_dev_hz / fm_max_dev_hz))
             inst_bin = (tx.base_freq_hz + freq_dev_hz - cfg.start) / hz_per_bin
             self._add_gaussian(spectrum, inst_bin, 0.95, carrier_gain * 0.55)
 
             modulation_index = 0.45 + 1.1 * abs(mod_signal)
-            side_spacing = 2.0 + 7.0 * abs(mod_signal)
+            side_spacing_hz = 10e3 + 40e3 * abs(mod_signal)
+            side_spacing = side_spacing_hz / hz_per_bin
             side_gain_1 = carrier_gain * min(0.72, 0.33 * modulation_index)
             side_gain_2 = carrier_gain * min(0.44, 0.18 * modulation_index)
-            self._add_gaussian(spectrum, base_bin - side_spacing, 1.1, side_gain_1)
-            self._add_gaussian(spectrum, base_bin + side_spacing, 1.1, side_gain_1)
-            self._add_gaussian(spectrum, base_bin - 2.0 * side_spacing, 1.5, side_gain_2)
-            self._add_gaussian(spectrum, base_bin + 2.0 * side_spacing, 1.5, side_gain_2)
+
+            first_left = base_bin - side_spacing
+            first_right = base_bin + side_spacing
+            second_left = base_bin - 2.0 * side_spacing
+            second_right = base_bin + 2.0 * side_spacing
+
+            min_bin = (tx.base_freq_hz - fm_max_dev_hz - cfg.start) / hz_per_bin
+            max_bin = (tx.base_freq_hz + fm_max_dev_hz - cfg.start) / hz_per_bin
+
+            def add_sideband_limited(center_bin: float, sigma: float, gain: float) -> None:
+                # Klipp center till kanalgransen men behall kontinuitet med mjuk amplituddampning.
+                clipped = float(np.clip(center_bin, min_bin, max_bin))
+                overflow = abs(center_bin - clipped)
+                taper = float(np.exp(-0.35 * overflow))
+                self._add_gaussian(spectrum, clipped, sigma, gain * taper)
+
+            add_sideband_limited(first_left, 1.1, side_gain_1)
+            add_sideband_limited(first_right, 1.1, side_gain_1)
+            add_sideband_limited(second_left, 1.5, side_gain_2)
+            add_sideband_limited(second_right, 1.5, side_gain_2)
 
     def generate(self, cfg: MockConfig) -> np.ndarray:
         bins_per_step = self._bins_per_step(cfg)
@@ -200,8 +277,12 @@ class TransmitterRow(QWidget):
         self._on_change = on_change
         self._on_remove = on_remove
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
 
         self.enabled = QCheckBox(f"TX {tx_id}")
         self.enabled.setChecked(True)
@@ -216,34 +297,94 @@ class TransmitterRow(QWidget):
         self.modulation = QComboBox()
         self.modulation.addItems(["FM", "AM"])
 
+        self.signal_type = QComboBox()
+        self.signal_type.addItems(["Continuous", "Pulse"])
+
         self.power = QSlider(Qt.Horizontal)
-        self.power.setRange(-110, 20)
-        self.power.setValue(-55)
-        self.power_label = QLabel("-55 dB")
+        self.power.setRange(0, 80)
+        self.power.setValue(35)
+        self.power_label = QLabel("+35 dB")
         self.power_label.setFixedWidth(54)
 
         self.btn_remove = QPushButton("Ta bort")
 
-        layout.addWidget(self.enabled)
-        layout.addWidget(self.freq)
-        layout.addWidget(self.modulation)
-        layout.addWidget(QLabel("Styrka:"))
-        layout.addWidget(self.power, 1)
-        layout.addWidget(self.power_label)
-        layout.addWidget(self.btn_remove)
+        top_row.addWidget(self.enabled)
+        top_row.addWidget(self.freq)
+        top_row.addWidget(self.modulation)
+        top_row.addWidget(self.signal_type)
+        top_row.addWidget(QLabel("Styrka rel. brus:"))
+        top_row.addWidget(self.power, 1)
+        top_row.addWidget(self.power_label)
+        top_row.addWidget(self.btn_remove)
+        layout.addLayout(top_row)
+
+        pulse_row = QHBoxLayout()
+        pulse_row.setContentsMargins(22, 0, 0, 0)
+        self.pulse_on_label = QLabel("Puls ON [ms]:")
+        pulse_row.addWidget(self.pulse_on_label)
+        self.pulse_on_min = QDoubleSpinBox()
+        self.pulse_on_min.setRange(1.0, 10000.0)
+        self.pulse_on_min.setValue(120.0)
+        self.pulse_on_min.setPrefix("min ")
+        self.pulse_on_min.setSuffix(" ms")
+        self.pulse_on_max = QDoubleSpinBox()
+        self.pulse_on_max.setRange(1.0, 10000.0)
+        self.pulse_on_max.setValue(350.0)
+        self.pulse_on_max.setPrefix("max ")
+        self.pulse_on_max.setSuffix(" ms")
+
+        pulse_row.addWidget(self.pulse_on_min)
+        pulse_row.addWidget(self.pulse_on_max)
+        pulse_row.addSpacing(12)
+        self.pulse_off_label = QLabel("Puls OFF [ms]:")
+        pulse_row.addWidget(self.pulse_off_label)
+        self.pulse_off_min = QDoubleSpinBox()
+        self.pulse_off_min.setRange(1.0, 10000.0)
+        self.pulse_off_min.setValue(180.0)
+        self.pulse_off_min.setPrefix("min ")
+        self.pulse_off_min.setSuffix(" ms")
+        self.pulse_off_max = QDoubleSpinBox()
+        self.pulse_off_max.setRange(1.0, 10000.0)
+        self.pulse_off_max.setValue(700.0)
+        self.pulse_off_max.setPrefix("max ")
+        self.pulse_off_max.setSuffix(" ms")
+        pulse_row.addWidget(self.pulse_off_min)
+        pulse_row.addWidget(self.pulse_off_max)
+        pulse_row.addStretch()
+        layout.addLayout(pulse_row)
+        self.pulse_widgets = [
+            self.pulse_on_label,
+            self.pulse_on_min,
+            self.pulse_on_max,
+            self.pulse_off_label,
+            self.pulse_off_min,
+            self.pulse_off_max,
+        ]
 
         self.enabled.stateChanged.connect(self._signal_change)
         self.freq.valueChanged.connect(self._signal_change)
         self.modulation.currentTextChanged.connect(self._signal_change)
+        self.signal_type.currentTextChanged.connect(self._on_signal_type_changed)
         self.power.valueChanged.connect(self._on_power_changed)
+        self.pulse_on_min.valueChanged.connect(self._signal_change)
+        self.pulse_on_max.valueChanged.connect(self._signal_change)
+        self.pulse_off_min.valueChanged.connect(self._signal_change)
+        self.pulse_off_max.valueChanged.connect(self._signal_change)
         self.btn_remove.clicked.connect(self._remove_self)
+        self._on_signal_type_changed(self.signal_type.currentText())
 
     def set_values(self, tx: TransmitterConfig) -> None:
         self.enabled.setChecked(tx.enabled)
         self.freq.setValue(tx.base_freq_hz / 1e6)
         self.modulation.setCurrentText(tx.modulation.upper())
+        self.signal_type.setCurrentText(tx.signal_type)
         self.power.setValue(int(round(tx.power_db)))
-        self.power_label.setText(f"{int(round(tx.power_db))} dB")
+        self.power_label.setText(f"+{int(round(tx.power_db))} dB")
+        self.pulse_on_min.setValue(float(tx.pulse_on_min_ms))
+        self.pulse_on_max.setValue(float(tx.pulse_on_max_ms))
+        self.pulse_off_min.setValue(float(tx.pulse_off_min_ms))
+        self.pulse_off_max.setValue(float(tx.pulse_off_max_ms))
+        self._on_signal_type_changed(self.signal_type.currentText())
 
     def get_config(self) -> TransmitterConfig:
         return TransmitterConfig(
@@ -251,15 +392,26 @@ class TransmitterRow(QWidget):
             enabled=self.enabled.isChecked(),
             base_freq_hz=float(self.freq.value()) * 1e6,
             modulation=self.modulation.currentText(),
+            signal_type=self.signal_type.currentText(),
             power_db=float(self.power.value()),
+            pulse_on_min_ms=float(self.pulse_on_min.value()),
+            pulse_on_max_ms=float(self.pulse_on_max.value()),
+            pulse_off_min_ms=float(self.pulse_off_min.value()),
+            pulse_off_max_ms=float(self.pulse_off_max.value()),
         )
 
     def _on_power_changed(self, value: int) -> None:
-        self.power_label.setText(f"{value} dB")
+        self.power_label.setText(f"+{value} dB")
         self._signal_change()
 
     def _signal_change(self) -> None:
         self._on_change()
+
+    def _on_signal_type_changed(self, value: str) -> None:
+        show_pulse = value.upper() == "PULSE"
+        for widget in self.pulse_widgets:
+            widget.setVisible(show_pulse)
+        self._signal_change()
 
     def _remove_self(self) -> None:
         self._on_remove(self)
