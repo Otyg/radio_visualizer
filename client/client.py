@@ -120,9 +120,8 @@ class SpectrumLineWidget(QWidget):
         # Kalibrering mot serverns byte-skala: dB = (value / 3) - 60.
         self.noise_reference_db = -30.0
         self.min_display_span_db = 18.0
-        self.top_headroom_db = 3.0
         self.bottom_padding_db = 12.0
-        self._smoothed_peak_db = None
+        self.max_display_top_db = 30.0
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
@@ -153,7 +152,6 @@ class SpectrumLineWidget(QWidget):
 
     def set_noise_reference_db(self, value_db):
         self.noise_reference_db = float(value_db)
-        self._smoothed_peak_db = None
         self.update()
 
     @staticmethod
@@ -161,22 +159,7 @@ class SpectrumLineWidget(QWidget):
         return (float(value) / 3.0) - 60.0
 
     def _compute_db_window(self):
-        if not self.latest_data:
-            top_db = self.noise_reference_db + self.top_headroom_db
-            bottom_db = top_db - self.min_display_span_db
-            return bottom_db, top_db
-
-        frame_peak_db = self._byte_to_db(max(self.latest_data))
-        target_peak_db = max(frame_peak_db, self.noise_reference_db + 6.0)
-
-        if self._smoothed_peak_db is None:
-            self._smoothed_peak_db = target_peak_db
-        else:
-            # Snabb attack och långsammare release för stabil visning.
-            alpha = 0.35 if target_peak_db > self._smoothed_peak_db else 0.12
-            self._smoothed_peak_db = (1.0 - alpha) * self._smoothed_peak_db + alpha * target_peak_db
-
-        top_db = self._smoothed_peak_db + self.top_headroom_db
+        top_db = self.max_display_top_db
         noise_floor_db = min(self.noise_reference_db, top_db - 4.0)
         bottom_db = noise_floor_db - self.bottom_padding_db
         span_db = top_db - bottom_db
