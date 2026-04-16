@@ -102,6 +102,7 @@ class SpectrumLineWidget(QWidget):
         self.start_f = 88.0
         self.stop_f = 108.0
         self.latest_data = b""
+        self.threshold = 45
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
@@ -110,6 +111,10 @@ class SpectrumLineWidget(QWidget):
 
     def set_data(self, data_bytes):
         self.latest_data = data_bytes
+        self.update()
+
+    def set_threshold(self, threshold):
+        self.threshold = max(0, min(255, int(threshold)))
         self.update()
 
     def paintEvent(self, event):
@@ -131,6 +136,9 @@ class SpectrumLineWidget(QWidget):
             painter.drawLine(draw_rect.left(), y, draw_rect.right(), y)
 
         if not self.latest_data:
+            y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
+            painter.setPen(QPen(QColor(255, 60, 60), 1.5))
+            painter.drawLine(draw_rect.left(), y_thr, draw_rect.right(), y_thr)
             return
 
         width = len(self.latest_data)
@@ -151,6 +159,10 @@ class SpectrumLineWidget(QWidget):
             p0 = points[i]
             p1 = points[i + 1]
             painter.drawLine(p0[0], p0[1], p1[0], p1[1])
+
+        y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
+        painter.setPen(QPen(QColor(255, 60, 60), 1.5))
+        painter.drawLine(draw_rect.left(), y_thr, draw_rect.right(), y_thr)
 
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
@@ -188,7 +200,7 @@ class MainWindow(QMainWindow):
         self.thresh_slider.setFixedWidth(120)
         self.thresh_label = QLabel("45")
         self.thresh_label.setFixedWidth(25)
-        self.thresh_slider.valueChanged.connect(lambda v: self.thresh_label.setText(str(v)))
+        self.thresh_slider.valueChanged.connect(self.on_threshold_changed)
 
         self.btn_run = QPushButton("SVEP")
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
@@ -224,6 +236,12 @@ class MainWindow(QMainWindow):
         self.ws = None
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
+        self.spectrum_line.set_threshold(self.thresh_slider.value())
+
+    @Slot(int)
+    def on_threshold_changed(self, value):
+        self.thresh_label.setText(str(value))
+        self.spectrum_line.set_threshold(value)
 
     @Slot(bytes)
     def on_data_received(self, data):
