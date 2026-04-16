@@ -54,7 +54,14 @@ class WaterfallWidget(QWidget):
         self.image = QImage(1024, 1000, QImage.Format_RGB32)
         self.image.fill(Qt.black)
         self.current_row = 0
-        self.margin = 40 
+        self.margin = 40
+        self.color_lut = [self._rainbow_color(i / 255.0) for i in range(256)]
+
+    @staticmethod
+    def _rainbow_color(norm):
+        # Standardiserad "regnbåge": låg intensitet = blå, hög = röd.
+        hue = (2.0 / 3.0) * (1.0 - max(0.0, min(1.0, norm)))
+        return QColor.fromHsvF(hue, 1.0, 1.0)
 
     def add_line(self, data_bytes, threshold):
         width = len(data_bytes)
@@ -73,8 +80,7 @@ class WaterfallWidget(QWidget):
                 # Skalning för heatmap
                 nv = int(((val - threshold) / (255 - threshold)) * 255)
                 nv = max(0, min(255, nv))
-                # Färgskala: Mörkröd -> Gul -> Vit
-                self.image.setPixelColor(x, self.current_row, QColor(nv, int(nv*0.5), int(nv*0.1)))
+                self.image.setPixelColor(x, self.current_row, self.color_lut[nv])
 
         self.current_row = (self.current_row + 1) % self.image.height()
         self.update()
