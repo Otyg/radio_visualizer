@@ -507,7 +507,7 @@ class MockServerWindow(QMainWindow):
 
         tx_header = QHBoxLayout()
         self.add_tx_button = QPushButton("Lagg till sandare")
-        self.add_tx_button.clicked.connect(self._add_transmitter)
+        self.add_tx_button.clicked.connect(lambda _checked=False: self._add_transmitter())
         tx_header.addWidget(self.add_tx_button)
         tx_header.addStretch()
         tx_layout.addLayout(tx_header)
@@ -556,7 +556,7 @@ class MockServerWindow(QMainWindow):
         self._tx_counter += 1
         row = TransmitterRow(self._tx_counter, self._sync_transmitters_to_state, self._remove_transmitter)
 
-        if tx is not None:
+        if isinstance(tx, TransmitterConfig):
             row.set_values(tx)
         else:
             row.freq.setValue(95.0 + 0.7 * len(self.tx_rows))

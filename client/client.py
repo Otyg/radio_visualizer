@@ -183,6 +183,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Gemini SDR Visualizer")
         self.resize(1200, 800)
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+        self.auto_noise_enabled = False
+        self.auto_noise_estimate = None
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -212,6 +214,9 @@ class MainWindow(QMainWindow):
         self.thresh_label = QLabel("45")
         self.thresh_label.setFixedWidth(25)
         self.thresh_slider.valueChanged.connect(self.on_threshold_changed)
+        self.chk_auto_noise = QCheckBox("Auto brus")
+        self.chk_auto_noise.setChecked(False)
+        self.chk_auto_noise.toggled.connect(self.on_toggle_auto_noise)
 
         self.btn_run = QPushButton("SVEP")
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
@@ -237,6 +242,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(QLabel("Brus:"))
         ctrl_layout.addWidget(self.thresh_slider)
         ctrl_layout.addWidget(self.thresh_label)
+        ctrl_layout.addWidget(self.chk_auto_noise)
         ctrl_layout.addSpacing(12)
         ctrl_layout.addWidget(self.chk_spectrum)
         ctrl_layout.addWidget(self.chk_waterfall)
@@ -267,8 +273,51 @@ class MainWindow(QMainWindow):
         self.thresh_label.setText(str(value))
         self.spectrum_line.set_threshold(value)
 
+    @Slot(bool)
+    def on_toggle_auto_noise(self, enabled):
+        self.auto_noise_enabled = bool(enabled)
+        self.auto_noise_estimate = None
+
+    @staticmethod
+    def _percentile_from_hist(hist, total, percentile):
+        if total <= 0:
+            return 0
+        target = int(round((percentile / 100.0) * (total - 1)))
+        running = 0
+        for value, count in enumerate(hist):
+            running += count
+            if running > target:
+                return value
+        return 255
+
+    def _update_auto_noise_threshold(self, data):
+        if not data:
+            return
+
+        hist = [0] * 256
+        for value in data:
+            hist[value] += 1
+        total = len(data)
+
+        p50 = self._percentile_from_hist(hist, total, 50)
+        p90 = self._percentile_from_hist(hist, total, 90)
+        spread = max(1, p90 - p50)
+
+        # Gissa brusgolv via robusta percentiler och håll tröskeln lite ovanför golvet.
+        raw_target = p50 + int(0.25 * spread) + 6
+        raw_target = max(0, min(255, raw_target))
+
+        if self.auto_noise_estimate is None:
+            self.auto_noise_estimate = float(raw_target)
+        else:
+            self.auto_noise_estimate = 0.85 * self.auto_noise_estimate + 0.15 * raw_target
+
+        self.thresh_slider.setValue(int(round(self.auto_noise_estimate)))
+
     @Slot(bytes)
     def on_data_received(self, data):
+        if self.auto_noise_enabled:
+            self._update_auto_noise_threshold(data)
         if self.chk_spectrum.isChecked():
             self.spectrum_line.set_data(data)
         if self.chk_waterfall.isChecked():
