@@ -91,6 +91,7 @@ class MockSpectrumEngine:
     def __init__(self) -> None:
         self.rng = np.random.default_rng()
         self._phase_by_tx: dict[int, float] = {}
+        self._phase_step_by_tx: dict[int, float] = {}
 
     @staticmethod
     def _bins_per_step(cfg: MockConfig) -> int:
@@ -111,14 +112,18 @@ class MockSpectrumEngine:
         phase = self._phase_by_tx.get(tx_id)
         if phase is None:
             phase = float(self.rng.uniform(0.0, 2.0 * np.pi))
+            self._phase_step_by_tx[tx_id] = float(self.rng.normal(0.24, 0.03))
 
         # Modulationssignal: sinus med normalfordelad slumpkomponent.
         gauss_sample = float(self.rng.normal(0.0, 1.0))
-        mod_signal = float(np.sin(phase) + 0.35 * gauss_sample)
+        mod_signal = float(np.sin(phase) + 0.30 * gauss_sample)
 
-        phase_step = float(self.rng.normal(0.26, 0.04))
+        phase_step = self._phase_step_by_tx.get(tx_id, 0.24)
+        phase_step += float(self.rng.normal(0.0, 0.004))
+        phase_step = float(np.clip(phase_step, 0.08, 0.5))
+        self._phase_step_by_tx[tx_id] = phase_step
         self._phase_by_tx[tx_id] = phase + phase_step
-        return float(np.clip(mod_signal, -2.0, 2.0))
+        return float(np.clip(mod_signal, -1.5, 1.5))
 
     @staticmethod
     def _add_gaussian(spectrum: np.ndarray, center_bin: float, sigma_bins: float, gain_db: float) -> None:
@@ -136,33 +141,38 @@ class MockSpectrumEngine:
             return
 
         hz_per_bin = span_hz / max(1, spectrum.size)
-        base_gain = max(0.0, tx.power_db - cfg.noise_floor_db)
+        # Sändarstyrkan styr amplituden pa carriern direkt relativt brusgolvet.
+        carrier_gain = max(0.0, tx.power_db - cfg.noise_floor_db)
+        if carrier_gain <= 0.0:
+            return
         mod_signal = self._next_mod_signal(tx.tx_id)
 
         base_bin = (tx.base_freq_hz - cfg.start) / hz_per_bin
-        sigma_carrier = 1.2
+        sigma_carrier = 0.8
+        self._add_gaussian(spectrum, base_bin, sigma_carrier, carrier_gain)
 
         if tx.modulation.upper() == "AM":
-            amp_scale = 1.0 + 0.45 * mod_signal
-            carrier_gain = max(0.0, base_gain * amp_scale)
-            self._add_gaussian(spectrum, base_bin, sigma_carrier, carrier_gain)
-
-            side_offset = 4.0 + abs(mod_signal) * 14.0
-            side_gain = max(0.0, 0.35 * carrier_gain)
-            self._add_gaussian(spectrum, base_bin - side_offset, 1.7, side_gain)
-            self._add_gaussian(spectrum, base_bin + side_offset, 1.7, side_gain)
+            modulation_depth = float(np.clip(0.2 + 0.45 * abs(mod_signal), 0.0, 1.0))
+            side_offset = 2.5 + 9.0 * abs(mod_signal)
+            side_gain_1 = carrier_gain * modulation_depth * 0.48
+            side_gain_2 = carrier_gain * modulation_depth * 0.22
+            self._add_gaussian(spectrum, base_bin - side_offset, 1.1, side_gain_1)
+            self._add_gaussian(spectrum, base_bin + side_offset, 1.1, side_gain_1)
+            self._add_gaussian(spectrum, base_bin - 2.0 * side_offset, 1.4, side_gain_2)
+            self._add_gaussian(spectrum, base_bin + 2.0 * side_offset, 1.4, side_gain_2)
         else:
-            freq_dev_hz = 0.06 * cfg.step_size * mod_signal
-            center_bin = (tx.base_freq_hz + freq_dev_hz - cfg.start) / hz_per_bin
-            self._add_gaussian(spectrum, center_bin, sigma_carrier, base_gain)
+            freq_dev_hz = 0.05 * cfg.step_size * mod_signal
+            inst_bin = (tx.base_freq_hz + freq_dev_hz - cfg.start) / hz_per_bin
+            self._add_gaussian(spectrum, inst_bin, 0.95, carrier_gain * 0.55)
 
-            side_spacing = 2.0 + abs(mod_signal) * 10.0
-            side_gain_1 = max(0.0, 0.42 * base_gain)
-            side_gain_2 = max(0.0, 0.2 * base_gain)
-            self._add_gaussian(spectrum, center_bin - side_spacing, 1.5, side_gain_1)
-            self._add_gaussian(spectrum, center_bin + side_spacing, 1.5, side_gain_1)
-            self._add_gaussian(spectrum, center_bin - 2.0 * side_spacing, 1.8, side_gain_2)
-            self._add_gaussian(spectrum, center_bin + 2.0 * side_spacing, 1.8, side_gain_2)
+            modulation_index = 0.45 + 1.1 * abs(mod_signal)
+            side_spacing = 2.0 + 7.0 * abs(mod_signal)
+            side_gain_1 = carrier_gain * min(0.72, 0.33 * modulation_index)
+            side_gain_2 = carrier_gain * min(0.44, 0.18 * modulation_index)
+            self._add_gaussian(spectrum, base_bin - side_spacing, 1.1, side_gain_1)
+            self._add_gaussian(spectrum, base_bin + side_spacing, 1.1, side_gain_1)
+            self._add_gaussian(spectrum, base_bin - 2.0 * side_spacing, 1.5, side_gain_2)
+            self._add_gaussian(spectrum, base_bin + 2.0 * side_spacing, 1.5, side_gain_2)
 
     def generate(self, cfg: MockConfig) -> np.ndarray:
         bins_per_step = self._bins_per_step(cfg)
