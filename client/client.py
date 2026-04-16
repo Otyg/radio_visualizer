@@ -117,6 +117,12 @@ class SpectrumLineWidget(QWidget):
         self.latest_data = b""
         self.max_hold_data = None
         self.threshold = 45
+        # Kalibrering mot serverns byte-skala: dB = (value / 3) - 60.
+        self.noise_reference_db = -30.0
+        self.min_display_span_db = 18.0
+        self.top_headroom_db = 3.0
+        self.bottom_padding_db = 12.0
+        self._smoothed_peak_db = None
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
@@ -145,6 +151,46 @@ class SpectrumLineWidget(QWidget):
         self.max_hold_data = None
         self.update()
 
+    def set_noise_reference_db(self, value_db):
+        self.noise_reference_db = float(value_db)
+        self._smoothed_peak_db = None
+        self.update()
+
+    @staticmethod
+    def _byte_to_db(value):
+        return (float(value) / 3.0) - 60.0
+
+    def _compute_db_window(self):
+        if not self.latest_data:
+            top_db = self.noise_reference_db + self.top_headroom_db
+            bottom_db = top_db - self.min_display_span_db
+            return bottom_db, top_db
+
+        frame_peak_db = self._byte_to_db(max(self.latest_data))
+        target_peak_db = max(frame_peak_db, self.noise_reference_db + 6.0)
+
+        if self._smoothed_peak_db is None:
+            self._smoothed_peak_db = target_peak_db
+        else:
+            # Snabb attack och långsammare release för stabil visning.
+            alpha = 0.35 if target_peak_db > self._smoothed_peak_db else 0.12
+            self._smoothed_peak_db = (1.0 - alpha) * self._smoothed_peak_db + alpha * target_peak_db
+
+        top_db = self._smoothed_peak_db + self.top_headroom_db
+        noise_floor_db = min(self.noise_reference_db, top_db - 4.0)
+        bottom_db = noise_floor_db - self.bottom_padding_db
+        span_db = top_db - bottom_db
+        if span_db < self.min_display_span_db:
+            bottom_db = top_db - self.min_display_span_db
+        return bottom_db, top_db
+
+    @staticmethod
+    def _db_to_y(db_value, bottom_db, top_db, draw_rect):
+        span_db = max(1e-6, top_db - bottom_db)
+        norm = (db_value - bottom_db) / span_db
+        norm = max(0.0, min(1.0, norm))
+        return int(draw_rect.bottom() - norm * draw_rect.height())
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -163,8 +209,11 @@ class SpectrumLineWidget(QWidget):
             y = int(draw_rect.top() + frac * draw_rect.height())
             painter.drawLine(draw_rect.left(), y, draw_rect.right(), y)
 
+        bottom_db, top_db = self._compute_db_window()
+
         if not self.latest_data:
-            y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
+            threshold_db = self._byte_to_db(self.threshold)
+            y_thr = self._db_to_y(threshold_db, bottom_db, top_db, draw_rect)
             painter.setPen(QPen(QColor(255, 60, 60), 1.5))
             painter.drawLine(draw_rect.left(), y_thr, draw_rect.right(), y_thr)
             return
@@ -177,17 +226,14 @@ class SpectrumLineWidget(QWidget):
         points = []
         for i, val in enumerate(self.latest_data):
             x = int(draw_rect.left() + i * x_step)
-            # 255 = starkast -> högst upp i ritytan.
-            norm = max(0.0, min(1.0, val / 255.0))
-            y = int(draw_rect.bottom() - norm * draw_rect.height())
+            y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, draw_rect)
             points.append((x, y))
 
         if self.max_hold_data and len(self.max_hold_data) == width:
             max_points = []
             for i, val in enumerate(self.max_hold_data):
                 x = int(draw_rect.left() + i * x_step)
-                norm = max(0.0, min(1.0, val / 255.0))
-                y = int(draw_rect.bottom() - norm * draw_rect.height())
+                y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, draw_rect)
                 max_points.append((x, y))
 
             painter.setPen(QPen(QColor(0, 95, 150), 1.5, Qt.DashLine))
@@ -202,7 +248,8 @@ class SpectrumLineWidget(QWidget):
             p1 = points[i + 1]
             painter.drawLine(p0[0], p0[1], p1[0], p1[1])
 
-        y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
+        threshold_db = self._byte_to_db(self.threshold)
+        y_thr = self._db_to_y(threshold_db, bottom_db, top_db, draw_rect)
         painter.setPen(QPen(QColor(255, 60, 60), 1.5))
         painter.drawLine(draw_rect.left(), y_thr, draw_rect.right(), y_thr)
 
@@ -249,6 +296,13 @@ class MainWindow(QMainWindow):
         self.chk_auto_noise = QCheckBox("Auto brus")
         self.chk_auto_noise.setChecked(False)
         self.chk_auto_noise.toggled.connect(self.on_toggle_auto_noise)
+        self.noise_ref_slider = QSlider(Qt.Horizontal)
+        self.noise_ref_slider.setRange(-40, -20)
+        self.noise_ref_slider.setValue(-30)
+        self.noise_ref_slider.setFixedWidth(120)
+        self.noise_ref_label = QLabel("-30")
+        self.noise_ref_label.setFixedWidth(30)
+        self.noise_ref_slider.valueChanged.connect(self.on_noise_reference_changed)
 
         self.btn_run = QPushButton("SVEP")
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
@@ -275,6 +329,10 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.thresh_slider)
         ctrl_layout.addWidget(self.thresh_label)
         ctrl_layout.addWidget(self.chk_auto_noise)
+        ctrl_layout.addSpacing(10)
+        ctrl_layout.addWidget(QLabel("Brusref (dB):"))
+        ctrl_layout.addWidget(self.noise_ref_slider)
+        ctrl_layout.addWidget(self.noise_ref_label)
         ctrl_layout.addSpacing(12)
         ctrl_layout.addWidget(self.chk_spectrum)
         ctrl_layout.addWidget(self.chk_waterfall)
@@ -297,6 +355,7 @@ class MainWindow(QMainWindow):
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
         self.spectrum_line.set_threshold(self.thresh_slider.value())
+        self.spectrum_line.set_noise_reference_db(float(self.noise_ref_slider.value()))
         self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
 
@@ -309,6 +368,11 @@ class MainWindow(QMainWindow):
     def on_toggle_auto_noise(self, enabled):
         self.auto_noise_enabled = bool(enabled)
         self.auto_noise_estimate = None
+
+    @Slot(int)
+    def on_noise_reference_changed(self, value):
+        self.noise_ref_label.setText(str(int(value)))
+        self.spectrum_line.set_noise_reference_db(float(value))
 
     @staticmethod
     def _percentile_from_hist(hist, total, percentile):
