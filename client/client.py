@@ -175,9 +175,7 @@ class SpectrumLineWidget(QWidget):
         span_db = max(1e-6, top_db - bottom_db)
         norm = (db_value - bottom_db) / span_db
         norm = max(0.0, min(1.0, norm))
-        usable_height = max(1, draw_rect.height() - 1)
-        y = int(round(draw_rect.bottom() - norm * usable_height))
-        return max(draw_rect.top() + 1, min(draw_rect.bottom() - 1, y))
+        return int(round(draw_rect.bottom() - norm * draw_rect.height()))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -210,41 +208,42 @@ class SpectrumLineWidget(QWidget):
         if width <= 1:
             return
 
-        plot_rect = draw_rect.adjusted(1, 1, -1, -1)
-        painter.save()
-        painter.setClipRect(plot_rect)
-
         x_step = draw_rect.width() / (width - 1)
         points = []
         for i, val in enumerate(self.latest_data):
             x = int(draw_rect.left() + i * x_step)
-            y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, plot_rect)
+            y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, draw_rect)
             points.append((x, y))
 
         if self.max_hold_data and len(self.max_hold_data) == width:
             max_points = []
             for i, val in enumerate(self.max_hold_data):
                 x = int(draw_rect.left() + i * x_step)
-                y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, plot_rect)
+                y = self._db_to_y(self._byte_to_db(val), bottom_db, top_db, draw_rect)
                 max_points.append((x, y))
 
-            painter.setPen(QPen(QColor(0, 95, 150), 1.5, Qt.DashLine))
+            max_pen = QPen(QColor(0, 95, 150), 1.0, Qt.DashLine)
+            max_pen.setCapStyle(Qt.FlatCap)
+            painter.setPen(max_pen)
             for i in range(len(max_points) - 1):
                 p0 = max_points[i]
                 p1 = max_points[i + 1]
                 painter.drawLine(p0[0], p0[1], p1[0], p1[1])
 
-        painter.setPen(QPen(QColor(0, 235, 255), 2))
+        spectrum_pen = QPen(QColor(0, 235, 255), 1.0)
+        spectrum_pen.setCapStyle(Qt.FlatCap)
+        painter.setPen(spectrum_pen)
         for i in range(len(points) - 1):
             p0 = points[i]
             p1 = points[i + 1]
             painter.drawLine(p0[0], p0[1], p1[0], p1[1])
 
         threshold_db = self._byte_to_db(self.threshold)
-        y_thr = self._db_to_y(threshold_db, bottom_db, top_db, plot_rect)
-        painter.setPen(QPen(QColor(255, 60, 60), 1.5))
+        y_thr = self._db_to_y(threshold_db, bottom_db, top_db, draw_rect)
+        threshold_pen = QPen(QColor(255, 60, 60), 1.0)
+        threshold_pen.setCapStyle(Qt.FlatCap)
+        painter.setPen(threshold_pen)
         painter.drawLine(draw_rect.left(), y_thr, draw_rect.right(), y_thr)
-        painter.restore()
 
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
