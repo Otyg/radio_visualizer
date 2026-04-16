@@ -335,14 +335,14 @@ class MainWindow(QMainWindow):
         p90 = self._percentile_from_hist(hist, total, 90)
         spread = max(1, p90 - p50)
 
-        # Gissa brusgolv via robusta percentiler och håll tröskeln lite ovanför golvet.
-        raw_target = p50 + int(0.25 * spread) + 6
+        # Gissa brusgolv via robusta percentiler och håll tröskeln tydligare ovanför golvet.
+        raw_target = p50 + int(0.45 * spread) + 10
         raw_target = max(0, min(255, raw_target))
 
         if self.auto_noise_estimate is None:
             self.auto_noise_estimate = float(raw_target)
         else:
-            self.auto_noise_estimate = 0.85 * self.auto_noise_estimate + 0.15 * raw_target
+            self.auto_noise_estimate = 0.70 * self.auto_noise_estimate + 0.30 * raw_target
 
         self.thresh_slider.setValue(int(round(self.auto_noise_estimate)))
 
