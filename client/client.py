@@ -5,7 +5,7 @@ import threading
 import math
 import argparse
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox)
+                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
@@ -58,6 +58,8 @@ class FrequencyRuler(QWidget):
             painter.drawText(rect, Qt.AlignCenter, text)
 
 class WaterfallWidget(QWidget):
+    frequency_selected = Signal(float)
+
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(400)
@@ -65,6 +67,8 @@ class WaterfallWidget(QWidget):
         self.image.fill(Qt.black)
         self.current_row = 0
         self.margin = 40
+        self.start_f = 88.0
+        self.stop_f = 108.0
         self.color_lut = [self._rainbow_color(i / 255.0) for i in range(256)]
 
     @staticmethod
@@ -72,6 +76,11 @@ class WaterfallWidget(QWidget):
         # Standardiserad "regnbåge": låg intensitet = blå, hög = röd.
         hue = (2.0 / 3.0) * (1.0 - max(0.0, min(1.0, norm)))
         return QColor.fromHsvF(hue, 1.0, 1.0)
+
+    def set_range(self, start_mhz, stop_mhz):
+        self.start_f = float(start_mhz)
+        self.stop_f = float(stop_mhz)
+        self.update()
 
     def add_line(self, data_bytes, threshold):
         width = len(data_bytes)
@@ -98,6 +107,25 @@ class WaterfallWidget(QWidget):
         self.update()
         return wrapped_to_top
 
+    def snapshot_image(self):
+        if self.image.isNull():
+            return QImage()
+        if self.current_row == 0:
+            return self.image.copy()
+
+        width = self.image.width()
+        height = self.image.height()
+        ordered = QImage(width, height, QImage.Format_RGB32)
+        ordered.fill(Qt.black)
+        painter = QPainter(ordered)
+        try:
+            bottom_height = height - self.current_row
+            painter.drawImage(QRect(0, 0, width, bottom_height), self.image, QRect(0, self.current_row, width, bottom_height))
+            painter.drawImage(QRect(0, bottom_height, width, self.current_row), self.image, QRect(0, 0, width, self.current_row))
+        finally:
+            painter.end()
+        return ordered
+
     def paintEvent(self, event):
         painter = QPainter(self)
         # Rita vattenfallet centrerat mellan marginalerna
@@ -106,6 +134,18 @@ class WaterfallWidget(QWidget):
         # Ram
         painter.setPen(QColor(70, 70, 70))
         painter.drawRect(display_rect)
+
+    def mousePressEvent(self, event):
+        display_rect = QRect(self.margin, 0, self.width() - 2 * self.margin, self.height())
+        if display_rect.width() <= 0 or not display_rect.contains(event.position().toPoint()):
+            super().mousePressEvent(event)
+            return
+
+        rel_x = (event.position().x() - display_rect.left()) / max(1.0, float(display_rect.width()))
+        rel_x = max(0.0, min(1.0, rel_x))
+        freq_mhz = self.start_f + rel_x * (self.stop_f - self.start_f)
+        self.frequency_selected.emit(freq_mhz)
+        super().mousePressEvent(event)
 
 class SpectrumLineWidget(QWidget):
     def __init__(self):
@@ -253,6 +293,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
         self.auto_noise_enabled = False
         self.auto_noise_estimate = None
+        self.is_paused = False
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -290,6 +331,38 @@ class MainWindow(QMainWindow):
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
         self.btn_run.clicked.connect(self.send_settings)
 
+        self.btn_pause = QPushButton("PAUS")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.setStyleSheet("""
+            QPushButton {
+                background-color: #5c5c5c;
+                border: 1px solid #757575;
+                font-weight: bold;
+                padding: 5px 12px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #696969;
+            }
+            QPushButton:pressed {
+                background-color: #4a4a4a;
+                border: 2px inset #2f2f2f;
+                padding-top: 6px;
+                padding-left: 13px;
+            }
+            QPushButton:checked {
+                background-color: #3d3d3d;
+                border: 2px inset #2a2a2a;
+                padding-top: 6px;
+                padding-left: 13px;
+            }
+        """)
+        self.btn_pause.toggled.connect(self.on_toggle_pause)
+
+        self.btn_export = QPushButton("Exportera bild")
+        self.btn_export.setStyleSheet("background-color: #2d7d46; font-weight: bold; padding: 5px 12px; border-radius: 3px;")
+        self.btn_export.clicked.connect(self.export_waterfall)
+
         self.chk_spectrum = QCheckBox("Linjespektrum")
         self.chk_spectrum.setChecked(True)
         self.chk_spectrum.toggled.connect(self.on_toggle_spectrum)
@@ -297,6 +370,8 @@ class MainWindow(QMainWindow):
         self.chk_waterfall = QCheckBox("Vattenfall")
         self.chk_waterfall.setChecked(True)
         self.chk_waterfall.toggled.connect(self.on_toggle_waterfall)
+        self.freq_pick_label = QLabel("Klickfrekvens: -")
+        self.freq_pick_label.setFixedWidth(170)
 
         ctrl_layout.addWidget(QLabel("Start (MHz):"))
         ctrl_layout.addWidget(self.start_input)
@@ -314,7 +389,10 @@ class MainWindow(QMainWindow):
         ctrl_layout.addSpacing(12)
         ctrl_layout.addWidget(self.chk_spectrum)
         ctrl_layout.addWidget(self.chk_waterfall)
+        ctrl_layout.addWidget(self.freq_pick_label)
         ctrl_layout.addStretch()
+        ctrl_layout.addWidget(self.btn_export)
+        ctrl_layout.addWidget(self.btn_pause)
         ctrl_layout.addWidget(self.btn_run)
 
         # --- VISUALISERING ---
@@ -335,6 +413,8 @@ class MainWindow(QMainWindow):
         self.on_threshold_changed(self.thresh_slider.value())
         self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
+        self.waterfall.set_range(start_mhz, stop_mhz)
+        self.waterfall.frequency_selected.connect(self.on_frequency_selected)
 
     @Slot(int)
     def on_threshold_changed(self, value):
@@ -386,6 +466,8 @@ class MainWindow(QMainWindow):
 
     @Slot(bytes)
     def on_data_received(self, data):
+        if self.is_paused:
+            return
         if self.auto_noise_enabled:
             self._update_auto_noise_threshold(data)
         if self.chk_spectrum.isChecked():
@@ -396,12 +478,31 @@ class MainWindow(QMainWindow):
                 self.spectrum_line.reset_max_hold()
 
     @Slot(bool)
+    def on_toggle_pause(self, paused):
+        self.is_paused = bool(paused)
+        self.btn_pause.setText("FORTSÄTT" if self.is_paused else "PAUS")
+        self._send_pause_state()
+
+    def _send_pause_state(self):
+        if not self.ws:
+            return
+        try:
+            msg = json.dumps({"paused": self.is_paused})
+            asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
+        except Exception as err:
+            print(f"Pause send error: {err}")
+
+    @Slot(bool)
     def on_toggle_spectrum(self, enabled):
         self.spectrum_line.setVisible(enabled)
 
     @Slot(bool)
     def on_toggle_waterfall(self, enabled):
         self.waterfall.setVisible(enabled)
+
+    @Slot(float)
+    def on_frequency_selected(self, freq_mhz):
+        self.freq_pick_label.setText(f"Klickfrekvens: {freq_mhz:.3f} MHz")
 
     def _build_settings_payload(self):
         s = float(self.start_input.text().replace(',', '.'))
@@ -441,10 +542,26 @@ class MainWindow(QMainWindow):
             e = payload["stop"] / 1e6
             self.ruler.set_range(s, e)
             self.spectrum_line.set_range(s, e)
+            self.waterfall.set_range(s, e)
             if self.ws:
                 msg = json.dumps(payload)
                 asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
+                self._send_pause_state()
         except Exception as err: print(f"Input Error: {err}")
+
+    def export_waterfall(self):
+        default_name = "waterfall.png"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportera vattenfall",
+            default_name,
+            "PNG-bild (*.png);;JPEG-bild (*.jpg *.jpeg);;Alla filer (*)"
+        )
+        if not filename:
+            return
+        image = self.waterfall.snapshot_image()
+        if not image.save(filename):
+            print(f"Kunde inte spara bild: {filename}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SDR-klient")

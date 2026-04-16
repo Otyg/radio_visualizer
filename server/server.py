@@ -31,7 +31,8 @@ state = {
     "stop": 108e6,
     "fft_size": 1024,
     "step_size": 1.5e6,
-    "sample_rate": 2.4e6
+    "sample_rate": 2.4e6,
+    "paused": False,
 }
 
 def get_clean_spectrum(samples, fft_size, step_size, sample_rate):
@@ -59,11 +60,17 @@ async def sdr_handler(websocket):
                     state["start"] = float(data["start"])
                 if "stop" in data:
                     state["stop"] = float(data["stop"])
+                if "paused" in data:
+                    state["paused"] = bool(data["paused"])
                 
                 # Uppdatera SDR-hårdvaran om sample_rate ändras (valfritt)
                 sdr.sample_rate = state["sample_rate"]
                 logger.info(f"{str(websocket.remote_address)} Uppdaterad konfig: {state}")
             except: pass
+
+            if state["paused"]:
+                await asyncio.sleep(0.05)
+                continue
 
             full_spectrum = []
             curr = state["start"]
