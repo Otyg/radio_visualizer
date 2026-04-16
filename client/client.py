@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 # Ändra 'localhost' till serverns IP om den körs på annan maskin
-                async with websockets.connect("ws://192.168.128.82:8765") as ws:
+                async with websockets.connect("ws://127.0.0.1:8765") as ws:
                     self.ws = ws
                     while True:
                         data = await ws.recv()
