@@ -94,6 +94,64 @@ class WaterfallWidget(QWidget):
         painter.setPen(QColor(70, 70, 70))
         painter.drawRect(display_rect)
 
+class SpectrumLineWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(110)
+        self.margin = 40
+        self.start_f = 88.0
+        self.stop_f = 108.0
+        self.latest_data = b""
+
+    def set_range(self, start_mhz, stop_mhz):
+        self.start_f = start_mhz
+        self.stop_f = stop_mhz
+        self.update()
+
+    def set_data(self, data_bytes):
+        self.latest_data = data_bytes
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor(20, 20, 20))
+
+        draw_rect = QRect(self.margin, 6, self.width() - 2 * self.margin, self.height() - 12)
+        if draw_rect.width() <= 2 or draw_rect.height() <= 2:
+            return
+
+        painter.setPen(QColor(55, 55, 55))
+        painter.drawRect(draw_rect)
+
+        # Horisontella referenslinjer för signalstyrka.
+        painter.setPen(QPen(QColor(45, 45, 45), 1, Qt.DashLine))
+        for frac in [0.25, 0.5, 0.75]:
+            y = int(draw_rect.top() + frac * draw_rect.height())
+            painter.drawLine(draw_rect.left(), y, draw_rect.right(), y)
+
+        if not self.latest_data:
+            return
+
+        width = len(self.latest_data)
+        if width <= 1:
+            return
+
+        x_step = draw_rect.width() / (width - 1)
+        points = []
+        for i, val in enumerate(self.latest_data):
+            x = int(draw_rect.left() + i * x_step)
+            # 255 = starkast -> högst upp i ritytan.
+            norm = max(0.0, min(1.0, val / 255.0))
+            y = int(draw_rect.bottom() - norm * draw_rect.height())
+            points.append((x, y))
+
+        painter.setPen(QPen(QColor(0, 235, 255), 2))
+        for i in range(len(points) - 1):
+            p0 = points[i]
+            p1 = points[i + 1]
+            painter.drawLine(p0[0], p0[1], p1[0], p1[1])
+
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
 
@@ -152,18 +210,25 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.btn_run)
 
         # --- VISUALISERING ---
+        self.spectrum_line = SpectrumLineWidget()
         self.ruler = FrequencyRuler()
         self.waterfall = WaterfallWidget()
         
         main_layout.addLayout(ctrl_layout)
+        main_layout.addWidget(self.spectrum_line)
         main_layout.addWidget(self.ruler)
         main_layout.addWidget(self.waterfall, 1)
         
         # Nätverk
         self.loop = asyncio.new_event_loop()
         self.ws = None
-        self.data_received.connect(lambda d: self.waterfall.add_line(d, self.thresh_slider.value()))
+        self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
+
+    @Slot(bytes)
+    def on_data_received(self, data):
+        self.spectrum_line.set_data(data)
+        self.waterfall.add_line(data, self.thresh_slider.value())
 
     def start_async(self):
         asyncio.set_event_loop(self.loop)
@@ -187,6 +252,7 @@ class MainWindow(QMainWindow):
             s = float(self.start_input.text().replace(',', '.'))
             e = float(self.stop_input.text().replace(',', '.'))
             self.ruler.set_range(s, e)
+            self.spectrum_line.set_range(s, e)
             if self.ws:
                 msg = json.dumps({
                     "start": s * 1e6,
