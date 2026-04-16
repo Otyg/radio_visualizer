@@ -4,7 +4,7 @@ import asyncio
 import threading
 import math
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox)
+                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
@@ -206,6 +206,14 @@ class MainWindow(QMainWindow):
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
         self.btn_run.clicked.connect(self.send_settings)
 
+        self.chk_spectrum = QCheckBox("Linjespektrum")
+        self.chk_spectrum.setChecked(True)
+        self.chk_spectrum.toggled.connect(self.on_toggle_spectrum)
+
+        self.chk_waterfall = QCheckBox("Vattenfall")
+        self.chk_waterfall.setChecked(True)
+        self.chk_waterfall.toggled.connect(self.on_toggle_waterfall)
+
         ctrl_layout.addWidget(QLabel("Start (MHz):"))
         ctrl_layout.addWidget(self.start_input)
         ctrl_layout.addWidget(QLabel("Stopp:"))
@@ -218,6 +226,9 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(QLabel("Brus:"))
         ctrl_layout.addWidget(self.thresh_slider)
         ctrl_layout.addWidget(self.thresh_label)
+        ctrl_layout.addSpacing(12)
+        ctrl_layout.addWidget(self.chk_spectrum)
+        ctrl_layout.addWidget(self.chk_waterfall)
         ctrl_layout.addStretch()
         ctrl_layout.addWidget(self.btn_run)
 
@@ -245,8 +256,18 @@ class MainWindow(QMainWindow):
 
     @Slot(bytes)
     def on_data_received(self, data):
-        self.spectrum_line.set_data(data)
-        self.waterfall.add_line(data, self.thresh_slider.value())
+        if self.chk_spectrum.isChecked():
+            self.spectrum_line.set_data(data)
+        if self.chk_waterfall.isChecked():
+            self.waterfall.add_line(data, self.thresh_slider.value())
+
+    @Slot(bool)
+    def on_toggle_spectrum(self, enabled):
+        self.spectrum_line.setVisible(enabled)
+
+    @Slot(bool)
+    def on_toggle_waterfall(self, enabled):
+        self.waterfall.setVisible(enabled)
 
     def start_async(self):
         asyncio.set_event_loop(self.loop)
