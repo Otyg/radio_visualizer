@@ -33,7 +33,7 @@ class TransmitterConfig:
     base_freq_hz: float = 98e6
     modulation: str = "FM"
     signal_type: str = "Continuous"
-    power_db: float = 35.0
+    power_db: float = -55.0
     pulse_on_min_ms: float = 120.0
     pulse_on_max_ms: float = 350.0
     pulse_off_min_ms: float = 180.0
@@ -52,7 +52,7 @@ class MockConfig:
     frame_interval_s: float = 0.06
     transmitters: list[TransmitterConfig] = field(
         default_factory=lambda: [
-            TransmitterConfig(tx_id=1, enabled=True, base_freq_hz=96.8e6, modulation="FM", power_db=35.0)
+            TransmitterConfig(tx_id=1, enabled=True, base_freq_hz=96.8e6, modulation="FM", power_db=-55.0)
         ]
     )
 
@@ -194,8 +194,8 @@ class MockSpectrumEngine:
             return
 
         hz_per_bin = span_hz / max(1, spectrum.size)
-        # Sändarstyrkan anges relativt bakgrundsbruset (dB over brusgolvet).
-        carrier_gain = max(0.0, tx.power_db)
+        # Sändarstyrkan anges som absolut niva i dB.
+        carrier_gain = max(0.0, tx.power_db - cfg.noise_floor_db)
         if carrier_gain <= 0.0:
             return
         pulse_gate = self._pulse_gate(tx, cfg)
@@ -301,9 +301,9 @@ class TransmitterRow(QWidget):
         self.signal_type.addItems(["Continuous", "Pulse"])
 
         self.power = QSlider(Qt.Horizontal)
-        self.power.setRange(0, 80)
-        self.power.setValue(35)
-        self.power_label = QLabel("+35 dB")
+        self.power.setRange(-110, 20)
+        self.power.setValue(-55)
+        self.power_label = QLabel("-55 dB")
         self.power_label.setFixedWidth(54)
 
         self.btn_remove = QPushButton("Ta bort")
@@ -312,7 +312,7 @@ class TransmitterRow(QWidget):
         top_row.addWidget(self.freq)
         top_row.addWidget(self.modulation)
         top_row.addWidget(self.signal_type)
-        top_row.addWidget(QLabel("Styrka rel. brus:"))
+        top_row.addWidget(QLabel("Styrka:"))
         top_row.addWidget(self.power, 1)
         top_row.addWidget(self.power_label)
         top_row.addWidget(self.btn_remove)
@@ -379,7 +379,7 @@ class TransmitterRow(QWidget):
         self.modulation.setCurrentText(tx.modulation.upper())
         self.signal_type.setCurrentText(tx.signal_type)
         self.power.setValue(int(round(tx.power_db)))
-        self.power_label.setText(f"+{int(round(tx.power_db))} dB")
+        self.power_label.setText(f"{int(round(tx.power_db))} dB")
         self.pulse_on_min.setValue(float(tx.pulse_on_min_ms))
         self.pulse_on_max.setValue(float(tx.pulse_on_max_ms))
         self.pulse_off_min.setValue(float(tx.pulse_off_min_ms))
@@ -401,7 +401,7 @@ class TransmitterRow(QWidget):
         )
 
     def _on_power_changed(self, value: int) -> None:
-        self.power_label.setText(f"+{value} dB")
+        self.power_label.setText(f"{value} dB")
         self._signal_change()
 
     def _signal_change(self) -> None:
