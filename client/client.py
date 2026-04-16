@@ -3,12 +3,22 @@ import json
 import asyncio
 import threading
 import math
+import argparse
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
 import websockets
+
+
+def normalize_remote_target(remote):
+    target = (remote or "").strip()
+    if not target:
+        target = "localhost"
+    if "://" in target:
+        return target
+    return f"ws://{target}:8765"
 
 class FrequencyRuler(QWidget):
     def __init__(self):
@@ -167,8 +177,9 @@ class SpectrumLineWidget(QWidget):
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
 
-    def __init__(self):
+    def __init__(self, remote_url, start_mhz, stop_mhz, step_mhz, fft_size):
         super().__init__()
+        self.remote_url = remote_url
         self.setWindowTitle("Gemini SDR Visualizer")
         self.resize(1200, 800)
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
@@ -183,15 +194,15 @@ class MainWindow(QMainWindow):
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setContentsMargins(15, 0, 15, 10)
         
-        self.start_input = QLineEdit("88.0")
-        self.stop_input = QLineEdit("108.0")
+        self.start_input = QLineEdit(f"{start_mhz:g}")
+        self.stop_input = QLineEdit(f"{stop_mhz:g}")
         for inp in [self.start_input, self.stop_input]: inp.setFixedWidth(60)
         
         self.fft_combo = QComboBox()
         self.fft_combo.addItems(["256","512", "1024", "2048", "4096"])
-        self.fft_combo.setCurrentText("1024")
+        self.fft_combo.setCurrentText(str(fft_size))
         
-        self.step_input = QLineEdit("1.5")
+        self.step_input = QLineEdit(f"{step_mhz:g}")
         self.step_input.setFixedWidth(40)
         
         self.thresh_slider = QSlider(Qt.Horizontal)
@@ -248,6 +259,8 @@ class MainWindow(QMainWindow):
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
         self.spectrum_line.set_threshold(self.thresh_slider.value())
+        self.ruler.set_range(start_mhz, stop_mhz)
+        self.spectrum_line.set_range(start_mhz, stop_mhz)
 
     @Slot(int)
     def on_threshold_changed(self, value):
@@ -269,6 +282,16 @@ class MainWindow(QMainWindow):
     def on_toggle_waterfall(self, enabled):
         self.waterfall.setVisible(enabled)
 
+    def _build_settings_payload(self):
+        s = float(self.start_input.text().replace(',', '.'))
+        e = float(self.stop_input.text().replace(',', '.'))
+        return {
+            "start": s * 1e6,
+            "stop": e * 1e6,
+            "fft_size": int(self.fft_combo.currentText()),
+            "step_size": float(self.step_input.text().replace(',', '.')) * 1e6
+        }
+
     def start_async(self):
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self.network_worker())
@@ -276,9 +299,13 @@ class MainWindow(QMainWindow):
     async def network_worker(self):
         while True:
             try:
-                # Ändra 'localhost' till serverns IP om den körs på annan maskin
-                async with websockets.connect("ws://127.0.0.1:8765") as ws:
+                async with websockets.connect(self.remote_url) as ws:
                     self.ws = ws
+                    try:
+                        # Skicka alltid startkonfig vid anslutning (inklusive default/CLI-värden).
+                        await ws.send(json.dumps(self._build_settings_payload()))
+                    except Exception as err:
+                        print(f"Init send error: {err}")
                     while True:
                         data = await ws.recv()
                         if isinstance(data, bytes):
@@ -288,23 +315,32 @@ class MainWindow(QMainWindow):
 
     def send_settings(self):
         try:
-            s = float(self.start_input.text().replace(',', '.'))
-            e = float(self.stop_input.text().replace(',', '.'))
+            payload = self._build_settings_payload()
+            s = payload["start"] / 1e6
+            e = payload["stop"] / 1e6
             self.ruler.set_range(s, e)
             self.spectrum_line.set_range(s, e)
             if self.ws:
-                msg = json.dumps({
-                    "start": s * 1e6,
-                    "stop": e * 1e6,
-                    "fft_size": int(self.fft_combo.currentText()),
-                    "step_size": float(self.step_input.text().replace(',', '.')) * 1e6
-                })
+                msg = json.dumps(payload)
                 asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
         except Exception as err: print(f"Input Error: {err}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SDR-klient")
+    parser.add_argument(
+        "--remote",
+        default="localhost",
+        help="Serverns hostname eller IP, t.ex. localhost eller 192.168.1.50",
+    )
+    parser.add_argument("--start", type=float, default=88.0, help="Startfrekvens i MHz")
+    parser.add_argument("--stop", type=float, default=108.0, help="Stoppfrekvens i MHz")
+    parser.add_argument("--step", type=float, default=1.5, help="Stegstorlek i MHz")
+    parser.add_argument("--fft", type=int, choices=[256, 512, 1024, 2048, 4096], default=1024, help="FFT-storlek")
+    args = parser.parse_args()
+    remote_url = normalize_remote_target(args.remote)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    win = MainWindow()
+    win = MainWindow(remote_url, args.start, args.stop, args.step, args.fft)
     win.show()
     sys.exit(app.exec())
