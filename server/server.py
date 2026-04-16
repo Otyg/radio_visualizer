@@ -1,5 +1,6 @@
 import sys
 import types
+import logging
 import ctypes
 
 # --- FIXAR FÖR PYTHON 3.13+ OCH LIBRTLSDR ---
@@ -19,6 +20,7 @@ import asyncio
 import websockets
 import numpy as np
 import json
+logger = logging.getLogger(__name__)
 
 sdr = RtlSdr()
 sdr.gain = 'auto'
@@ -42,7 +44,7 @@ def get_clean_spectrum(samples, fft_size, step_size, sample_rate):
     return power_db[margin : fft_size - margin]
 
 async def sdr_handler(websocket):
-    print("Klient ansluten!")
+    logger.info(f"Klient ansluten {str(websocket.remote_address)}")
     try:
         while True:
             # 1. Kolla efter nya parametrar
@@ -60,7 +62,7 @@ async def sdr_handler(websocket):
                 
                 # Uppdatera SDR-hårdvaran om sample_rate ändras (valfritt)
                 sdr.sample_rate = state["sample_rate"]
-                print(f"Uppdaterad konfig: {state}")
+                logger.info(f"{str(websocket.remote_address)} Uppdaterad konfig: {state}")
             except: pass
 
             full_spectrum = []
@@ -83,11 +85,11 @@ async def sdr_handler(websocket):
                 await websocket.send(normalized.tobytes())
                 
     except Exception as e:
-        print(f"Fel: {e}")
+        logger.error(f"Fel: {e}")
 
 async def main():
     async with websockets.serve(sdr_handler, "0.0.0.0", 8765):
-        print("Server redo...")
+        logger.info("Server redo...")
         await asyncio.Future()
 
 if __name__ == "__main__":
