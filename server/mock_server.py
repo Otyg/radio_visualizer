@@ -281,7 +281,7 @@ class MockServerWindow(QMainWindow):
 
         self.noise_label = QLabel()
         self.noise_slider = QSlider(Qt.Horizontal)
-        self.noise_slider.setRange(-110, -40)
+        self.noise_slider.setRange(-110, 0)
         self.noise_slider.setValue(-92)
         self.noise_slider.valueChanged.connect(self._on_noise_changed)
 
