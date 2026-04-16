@@ -110,7 +110,7 @@ class WaterfallWidget(QWidget):
 class SpectrumLineWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.setFixedHeight(110)
+        self.setFixedHeight(170)
         self.margin = 40
         self.start_f = 88.0
         self.stop_f = 108.0
@@ -172,14 +172,16 @@ class SpectrumLineWidget(QWidget):
         span_db = max(1e-6, top_db - bottom_db)
         norm = (db_value - bottom_db) / span_db
         norm = max(0.0, min(1.0, norm))
-        return int(draw_rect.bottom() - norm * draw_rect.height())
+        usable_height = max(1, draw_rect.height() - 1)
+        y = int(round(draw_rect.bottom() - norm * usable_height))
+        return max(draw_rect.top() + 1, min(draw_rect.bottom() - 1, y))
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor(20, 20, 20))
 
-        draw_rect = QRect(self.margin, 6, self.width() - 2 * self.margin, self.height() - 12)
+        draw_rect = QRect(self.margin, 8, self.width() - 2 * self.margin, self.height() - 16)
         if draw_rect.width() <= 2 or draw_rect.height() <= 2:
             return
 
@@ -279,13 +281,6 @@ class MainWindow(QMainWindow):
         self.chk_auto_noise = QCheckBox("Auto brus")
         self.chk_auto_noise.setChecked(False)
         self.chk_auto_noise.toggled.connect(self.on_toggle_auto_noise)
-        self.noise_ref_slider = QSlider(Qt.Horizontal)
-        self.noise_ref_slider.setRange(-40, -20)
-        self.noise_ref_slider.setValue(-30)
-        self.noise_ref_slider.setFixedWidth(120)
-        self.noise_ref_label = QLabel("-30")
-        self.noise_ref_label.setFixedWidth(30)
-        self.noise_ref_slider.valueChanged.connect(self.on_noise_reference_changed)
 
         self.btn_run = QPushButton("SVEP")
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
@@ -312,10 +307,6 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.thresh_slider)
         ctrl_layout.addWidget(self.thresh_label)
         ctrl_layout.addWidget(self.chk_auto_noise)
-        ctrl_layout.addSpacing(10)
-        ctrl_layout.addWidget(QLabel("Brusref (dB):"))
-        ctrl_layout.addWidget(self.noise_ref_slider)
-        ctrl_layout.addWidget(self.noise_ref_label)
         ctrl_layout.addSpacing(12)
         ctrl_layout.addWidget(self.chk_spectrum)
         ctrl_layout.addWidget(self.chk_waterfall)
@@ -337,8 +328,7 @@ class MainWindow(QMainWindow):
         self.ws = None
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
-        self.spectrum_line.set_threshold(self.thresh_slider.value())
-        self.spectrum_line.set_noise_reference_db(float(self.noise_ref_slider.value()))
+        self.on_threshold_changed(self.thresh_slider.value())
         self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
 
@@ -346,16 +336,13 @@ class MainWindow(QMainWindow):
     def on_threshold_changed(self, value):
         self.thresh_label.setText(str(value))
         self.spectrum_line.set_threshold(value)
+        # Samma slider som maskar vattenfallet sätter även nollnivån i linjespektrumet.
+        self.spectrum_line.set_noise_reference_db((float(value) / 3.0) - 60.0)
 
     @Slot(bool)
     def on_toggle_auto_noise(self, enabled):
         self.auto_noise_enabled = bool(enabled)
         self.auto_noise_estimate = None
-
-    @Slot(int)
-    def on_noise_reference_changed(self, value):
-        self.noise_ref_label.setText(str(int(value)))
-        self.spectrum_line.set_noise_reference_db(float(value))
 
     @staticmethod
     def _percentile_from_hist(hist, total, percentile):
