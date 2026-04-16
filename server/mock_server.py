@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtCore import QTimer
 
 
 @dataclass
@@ -61,6 +62,7 @@ class SharedState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cfg = MockConfig()
+        self._tx_activity: dict[int, bool] = {}
 
     def snapshot(self) -> MockConfig:
         with self._lock:
@@ -90,6 +92,14 @@ class SharedState:
     def set_transmitters(self, transmitters: list[TransmitterConfig]) -> None:
         with self._lock:
             self._cfg.transmitters = copy.deepcopy(transmitters)
+
+    def set_tx_activity(self, tx_activity: dict[int, bool]) -> None:
+        with self._lock:
+            self._tx_activity = dict(tx_activity)
+
+    def get_tx_activity(self) -> dict[int, bool]:
+        with self._lock:
+            return dict(self._tx_activity)
 
 
 class MockSpectrumEngine:
@@ -186,21 +196,21 @@ class MockSpectrumEngine:
         pulse_input = float(self.rng.normal(1.0, 0.22))
         return float(np.clip(pulse_input, 0.25, 1.7))
 
-    def _apply_transmitter(self, spectrum: np.ndarray, cfg: MockConfig, tx: TransmitterConfig) -> None:
+    def _apply_transmitter(self, spectrum: np.ndarray, cfg: MockConfig, tx: TransmitterConfig) -> bool:
         if not tx.enabled:
-            return
+            return False
         span_hz = max(1.0, cfg.stop - cfg.start)
         if tx.base_freq_hz < cfg.start - span_hz * 0.05 or tx.base_freq_hz > cfg.stop + span_hz * 0.05:
-            return
+            return False
 
         hz_per_bin = span_hz / max(1, spectrum.size)
         # Sändarstyrkan anges som absolut niva i dB.
         carrier_gain = max(0.0, tx.power_db - cfg.noise_floor_db)
         if carrier_gain <= 0.0:
-            return
+            return False
         pulse_gate = self._pulse_gate(tx, cfg)
         if pulse_gate <= 0.0:
-            return
+            return False
         carrier_gain *= pulse_gate
         mod_signal = self._next_mod_signal(tx.tx_id)
 
@@ -251,7 +261,9 @@ class MockSpectrumEngine:
             add_sideband_limited(second_left, 1.5, side_gain_2)
             add_sideband_limited(second_right, 1.5, side_gain_2)
 
-    def generate(self, cfg: MockConfig) -> np.ndarray:
+        return True
+
+    def generate(self, cfg: MockConfig) -> tuple[np.ndarray, dict[int, bool]]:
         bins_per_step = self._bins_per_step(cfg)
         total_bins = bins_per_step * self._num_steps(cfg)
 
@@ -264,10 +276,11 @@ class MockSpectrumEngine:
             size=total_bins,
         )
 
+        tx_activity: dict[int, bool] = {}
         for tx in cfg.transmitters:
-            self._apply_transmitter(spectrum, cfg, tx)
+            tx_activity[tx.tx_id] = self._apply_transmitter(spectrum, cfg, tx)
 
-        return np.clip(spectrum, -120.0, 20.0)
+        return np.clip(spectrum, -120.0, 20.0), tx_activity
 
 
 class TransmitterRow(QWidget):
@@ -286,6 +299,9 @@ class TransmitterRow(QWidget):
 
         self.enabled = QCheckBox(f"TX {tx_id}")
         self.enabled.setChecked(True)
+        self.tx_lamp = QLabel()
+        self.tx_lamp.setFixedSize(14, 14)
+        self.tx_lamp.setStyleSheet("background-color: #2b2b2b; border: 1px solid #555; border-radius: 7px;")
 
         self.freq = QDoubleSpinBox()
         self.freq.setDecimals(3)
@@ -309,6 +325,7 @@ class TransmitterRow(QWidget):
         self.btn_remove = QPushButton("Ta bort")
 
         top_row.addWidget(self.enabled)
+        top_row.addWidget(self.tx_lamp)
         top_row.addWidget(self.freq)
         top_row.addWidget(self.modulation)
         top_row.addWidget(self.signal_type)
@@ -416,6 +433,27 @@ class TransmitterRow(QWidget):
     def _remove_self(self) -> None:
         self._on_remove(self)
 
+    def set_activity_lamp(self, is_active: bool, blink_phase: bool) -> None:
+        if not self.enabled.isChecked():
+            self.tx_lamp.setStyleSheet("background-color: #2b2b2b; border: 1px solid #555; border-radius: 7px;")
+            return
+
+        if self.signal_type.currentText().upper() == "PULSE":
+            # Puls-sandare: tydlig blink under aktiv puls, mork nar den ar tyst.
+            if is_active and blink_phase:
+                self.tx_lamp.setStyleSheet(
+                    "background-color: #00ff66; border: 1px solid #66ff99; border-radius: 7px;"
+                )
+            else:
+                self.tx_lamp.setStyleSheet("background-color: #2b2b2b; border: 1px solid #555; border-radius: 7px;")
+            return
+
+        # Kontinuerlig sandare: statisk indikator, ingen blinkprioritet.
+        if is_active:
+            self.tx_lamp.setStyleSheet("background-color: #33aaff; border: 1px solid #77c7ff; border-radius: 7px;")
+        else:
+            self.tx_lamp.setStyleSheet("background-color: #2b2b2b; border: 1px solid #555; border-radius: 7px;")
+
 
 class MockServerWindow(QMainWindow):
     def __init__(self, state: SharedState) -> None:
@@ -423,6 +461,7 @@ class MockServerWindow(QMainWindow):
         self.state = state
         self._tx_counter = 0
         self.tx_rows: list[TransmitterRow] = []
+        self._blink_phase = False
 
         self.setWindowTitle("SDR Mock Server")
         self.resize(860, 520)
@@ -496,6 +535,11 @@ class MockServerWindow(QMainWindow):
             self._add_transmitter(tx)
         self._sync_transmitters_to_state()
 
+        self.lamp_timer = QTimer(self)
+        self.lamp_timer.setInterval(170)
+        self.lamp_timer.timeout.connect(self._refresh_tx_lamps)
+        self.lamp_timer.start()
+
     def _refresh_labels(self) -> None:
         self.noise_label.setText(str(self.noise_slider.value()))
         self.jitter_label.setText(str(self.jitter_slider.value()))
@@ -533,6 +577,12 @@ class MockServerWindow(QMainWindow):
         tx_cfg = [row.get_config() for row in self.tx_rows]
         self.state.set_transmitters(tx_cfg)
 
+    def _refresh_tx_lamps(self) -> None:
+        self._blink_phase = not self._blink_phase
+        tx_activity = self.state.get_tx_activity()
+        for row in self.tx_rows:
+            row.set_activity_lamp(tx_activity.get(row.tx_id, False), self._blink_phase)
+
 
 async def client_handler(websocket, state: SharedState, engine: MockSpectrumEngine) -> None:
     print("Klient ansluten till mock-server")
@@ -551,7 +601,8 @@ async def client_handler(websocket, state: SharedState, engine: MockSpectrumEngi
                 pass
 
             cfg = state.snapshot()
-            spectrum_db = engine.generate(cfg)
+            spectrum_db, tx_activity = engine.generate(cfg)
+            state.set_tx_activity(tx_activity)
             normalized = np.clip((spectrum_db + 60.0) * 3.0, 0, 255).astype(np.uint8)
             await websocket.send(normalized.tobytes())
             await asyncio.sleep(cfg.frame_interval_s)
