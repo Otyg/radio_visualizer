@@ -121,7 +121,9 @@ class SpectrumLineWidget(QWidget):
         self.noise_reference_db = -30.0
         self.min_display_span_db = 18.0
         self.bottom_padding_db = 12.0
-        self.max_display_top_db = 30.0
+        # Fast relativ skala: när brusnivån ändras flyttas hela grafen.
+        # Exempel: brus -30 dB => topp +30 dB (60 dB över brusref).
+        self.noise_to_top_db = 60.0
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
@@ -159,7 +161,7 @@ class SpectrumLineWidget(QWidget):
         return (float(value) / 3.0) - 60.0
 
     def _compute_db_window(self):
-        top_db = self.max_display_top_db
+        top_db = self.noise_reference_db + self.noise_to_top_db
         noise_floor_db = min(self.noise_reference_db, top_db - 4.0)
         bottom_db = noise_floor_db - self.bottom_padding_db
         span_db = top_db - bottom_db
