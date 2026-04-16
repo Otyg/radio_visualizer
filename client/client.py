@@ -75,7 +75,8 @@ class WaterfallWidget(QWidget):
 
     def add_line(self, data_bytes, threshold):
         width = len(data_bytes)
-        if width == 0: return
+        if width == 0:
+            return False
 
         if self.image.width() != width:
             self.image = QImage(width, 1000, QImage.Format_RGB32)
@@ -93,7 +94,9 @@ class WaterfallWidget(QWidget):
                 self.image.setPixelColor(x, self.current_row, self.color_lut[nv])
 
         self.current_row = (self.current_row + 1) % self.image.height()
+        wrapped_to_top = self.current_row == 0
         self.update()
+        return wrapped_to_top
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -136,6 +139,10 @@ class SpectrumLineWidget(QWidget):
 
     def set_threshold(self, threshold):
         self.threshold = max(0, min(255, int(threshold)))
+        self.update()
+
+    def reset_max_hold(self):
+        self.max_hold_data = None
         self.update()
 
     def paintEvent(self, event):
@@ -346,7 +353,9 @@ class MainWindow(QMainWindow):
         if self.chk_spectrum.isChecked():
             self.spectrum_line.set_data(data)
         if self.chk_waterfall.isChecked():
-            self.waterfall.add_line(data, self.thresh_slider.value())
+            wrapped = self.waterfall.add_line(data, self.thresh_slider.value())
+            if wrapped:
+                self.spectrum_line.reset_max_hold()
 
     @Slot(bool)
     def on_toggle_spectrum(self, enabled):
