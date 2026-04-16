@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-
+import logging
 import numpy as np
 import websockets
 from PySide6.QtCore import Qt
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import QTimer
-
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TransmitterConfig:
@@ -588,7 +588,7 @@ class MockServerWindow(QMainWindow):
 
 
 async def client_handler(websocket, state: SharedState, engine: MockSpectrumEngine) -> None:
-    print("Klient ansluten till mock-server")
+    logger.info(f"Klient ansluten till mock-server: {str(websocket.remote_address)}")
     try:
         while True:
             try:
@@ -610,7 +610,7 @@ async def client_handler(websocket, state: SharedState, engine: MockSpectrumEngi
             await websocket.send(normalized.tobytes())
             await asyncio.sleep(cfg.frame_interval_s)
     except websockets.exceptions.ConnectionClosed:
-        print("Klient kopplade ner")
+        logger.info(f"{str(websocket.remote_address)} kopplade ner")
 
 
 async def run_server(state: SharedState, stop_event: threading.Event) -> None:
@@ -620,7 +620,7 @@ async def run_server(state: SharedState, stop_event: threading.Event) -> None:
         await client_handler(ws, state, engine)
 
     async with websockets.serve(_handler, "0.0.0.0", 8765):
-        print("Mock-server lyssnar pa ws://0.0.0.0:8765")
+        logger.info("Mock-server lyssnar pa ws://0.0.0.0:8765")
         while not stop_event.is_set():
             await asyncio.sleep(0.1)
 
