@@ -175,12 +175,6 @@ class SpectrumLineWidget(QWidget):
             y = int(draw_rect.bottom() - norm * draw_rect.height())
             points.append((x, y))
 
-        painter.setPen(QPen(QColor(0, 235, 255), 2))
-        for i in range(len(points) - 1):
-            p0 = points[i]
-            p1 = points[i + 1]
-            painter.drawLine(p0[0], p0[1], p1[0], p1[1])
-
         if self.max_hold_data and len(self.max_hold_data) == width:
             max_points = []
             for i, val in enumerate(self.max_hold_data):
@@ -189,11 +183,17 @@ class SpectrumLineWidget(QWidget):
                 y = int(draw_rect.bottom() - norm * draw_rect.height())
                 max_points.append((x, y))
 
-            painter.setPen(QPen(QColor(255, 180, 40), 1.5, Qt.DashLine))
+            painter.setPen(QPen(QColor(0, 95, 150), 1.5, Qt.DashLine))
             for i in range(len(max_points) - 1):
                 p0 = max_points[i]
                 p1 = max_points[i + 1]
                 painter.drawLine(p0[0], p0[1], p1[0], p1[1])
+
+        painter.setPen(QPen(QColor(0, 235, 255), 2))
+        for i in range(len(points) - 1):
+            p0 = points[i]
+            p1 = points[i + 1]
+            painter.drawLine(p0[0], p0[1], p1[0], p1[1])
 
         y_thr = int(draw_rect.bottom() - (self.threshold / 255.0) * draw_rect.height())
         painter.setPen(QPen(QColor(255, 60, 60), 1.5))
