@@ -6,7 +6,7 @@ import math
 import argparse
 import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget)
+                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget, QMessageBox, QListWidget)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
@@ -342,6 +342,7 @@ class MainWindow(QMainWindow):
         self.auto_noise_enabled = False
         self.auto_noise_estimate = None
         self.is_paused = False
+        self.requested_server_shutdown = False
         default_center = (start_mhz + stop_mhz) / 2.0 if center_mhz is None else float(center_mhz)
         default_bandwidth = abs(stop_mhz - start_mhz) if bandwidth_mhz is None else float(bandwidth_mhz)
         if default_bandwidth <= 0:
@@ -369,13 +370,14 @@ class MainWindow(QMainWindow):
         self.step_input = QLineEdit(f"{step_mhz:g}")
         self.center_input = QLineEdit(f"{default_center:g}")
         self.bandwidth_input = QLineEdit(f"{default_bandwidth:g}")
-        self.scan_centers_input = QLineEdit(default_scan_centers)
         self.scan_bandwidth_input = QLineEdit(f"{default_scan_bandwidth:g}")
         self.scan_dwell_input = QLineEdit(f"{default_scan_dwell_ms:g}")
+        self.scan_center_add_input = QLineEdit("")
+        self.scan_center_add_input.setPlaceholderText("Lägg till MHz")
         for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input, self.scan_bandwidth_input, self.scan_dwell_input]:
             inp.setFixedWidth(65)
         self.step_input.setFixedWidth(55)
-        self.scan_centers_input.setMinimumWidth(260)
+        self.scan_center_add_input.setMinimumWidth(110)
 
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setDocumentMode(True)
@@ -405,12 +407,12 @@ class MainWindow(QMainWindow):
         scan_tab = QWidget()
         scan_layout = QHBoxLayout(scan_tab)
         scan_layout.setContentsMargins(8, 6, 8, 6)
-        scan_layout.addWidget(QLabel("Frekvenslista (MHz):"))
-        scan_layout.addWidget(self.scan_centers_input, 1)
+        scan_layout.addWidget(QLabel("Frekvenser hanteras i listpanelen till höger."))
         scan_layout.addWidget(QLabel("Global bandbredd (MHz):"))
         scan_layout.addWidget(self.scan_bandwidth_input)
         scan_layout.addWidget(QLabel("Aktiv tid/frekvens (ms):"))
         scan_layout.addWidget(self.scan_dwell_input)
+        scan_layout.addStretch()
         self.mode_tabs.addTab(scan_tab, "Scannerlista")
         self.mode_tabs.currentChanged.connect(self.on_mode_tab_changed)
 
@@ -465,6 +467,10 @@ class MainWindow(QMainWindow):
         self.btn_export.setStyleSheet("background-color: #2d7d46; font-weight: bold; padding: 5px 12px; border-radius: 3px;")
         self.btn_export.clicked.connect(self.export_waterfall)
 
+        self.btn_shutdown_server = QPushButton("Stoppa server")
+        self.btn_shutdown_server.setStyleSheet("background-color: #a32626; font-weight: bold; padding: 5px 12px; border-radius: 3px;")
+        self.btn_shutdown_server.clicked.connect(self.request_server_shutdown)
+
         self.chk_spectrum = QCheckBox("Linjespektrum")
         self.chk_spectrum.setChecked(True)
         self.chk_spectrum.toggled.connect(self.on_toggle_spectrum)
@@ -490,6 +496,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.freq_pick_label)
         ctrl_layout.addStretch()
         ctrl_layout.addWidget(self.btn_export)
+        ctrl_layout.addWidget(self.btn_shutdown_server)
         ctrl_layout.addWidget(self.btn_pause)
         ctrl_layout.addWidget(self.btn_run)
 
@@ -497,11 +504,52 @@ class MainWindow(QMainWindow):
         self.spectrum_line = SpectrumLineWidget()
         self.ruler = FrequencyRuler()
         self.waterfall = WaterfallWidget()
-        
+
+        self.freq_list_panel = QWidget()
+        self.freq_list_panel.setMinimumWidth(250)
+        self.freq_list_panel.setMaximumWidth(320)
+        freq_panel_layout = QVBoxLayout(self.freq_list_panel)
+        freq_panel_layout.setContentsMargins(8, 0, 10, 0)
+        freq_panel_layout.setSpacing(8)
+        freq_panel_layout.addWidget(QLabel("Scannerfrekvenser (MHz)"))
+        self.scan_center_list = QListWidget()
+        self.scan_center_list.setAlternatingRowColors(True)
+        freq_panel_layout.addWidget(self.scan_center_list, 1)
+
+        add_row = QHBoxLayout()
+        self.btn_add_scan_center = QPushButton("Lägg till")
+        self.btn_add_scan_center.clicked.connect(self.add_scan_center_from_input)
+        add_row.addWidget(self.scan_center_add_input, 1)
+        add_row.addWidget(self.btn_add_scan_center)
+        freq_panel_layout.addLayout(add_row)
+
+        action_row = QHBoxLayout()
+        self.btn_remove_scan_center = QPushButton("Ta bort vald")
+        self.btn_remove_scan_center.clicked.connect(self.remove_selected_scan_center)
+        self.btn_clear_scan_centers = QPushButton("Töm lista")
+        self.btn_clear_scan_centers.clicked.connect(self.clear_scan_centers)
+        action_row.addWidget(self.btn_remove_scan_center)
+        action_row.addWidget(self.btn_clear_scan_centers)
+        freq_panel_layout.addLayout(action_row)
+
+        self.scan_center_add_input.returnPressed.connect(self.add_scan_center_from_input)
+        self._populate_scan_center_list(default_scan_centers)
+
+        viz_container = QWidget()
+        viz_layout = QVBoxLayout(viz_container)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
+        viz_layout.setSpacing(0)
+        viz_layout.addWidget(self.spectrum_line)
+        viz_layout.addWidget(self.ruler)
+        viz_layout.addWidget(self.waterfall, 1)
+
         main_layout.addLayout(ctrl_layout)
-        main_layout.addWidget(self.spectrum_line)
-        main_layout.addWidget(self.ruler)
-        main_layout.addWidget(self.waterfall, 1)
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        content_layout.addWidget(viz_container, 1)
+        content_layout.addWidget(self.freq_list_panel)
+        main_layout.addLayout(content_layout, 1)
         
         # Nätverk
         self.loop = asyncio.new_event_loop()
@@ -516,6 +564,7 @@ class MainWindow(QMainWindow):
             self.mode_tabs.setCurrentIndex(2)
         else:
             self.mode_tabs.setCurrentIndex(0)
+        self.freq_list_panel.setVisible(self.mode_tabs.currentIndex() == 2)
         self._apply_current_range_to_visuals()
         self.waterfall.frequency_selected.connect(self.on_frequency_selected)
 
@@ -595,6 +644,27 @@ class MainWindow(QMainWindow):
         except Exception as err:
             print(f"Pause send error: {err}")
 
+    def request_server_shutdown(self):
+        if not self.ws:
+            print("Ingen serveranslutning för shutdown.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Stoppa server",
+            "Vill du stoppa servern?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.requested_server_shutdown = True
+        self.btn_shutdown_server.setEnabled(False)
+        try:
+            msg = json.dumps({"shutdown": True})
+            asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
+        except Exception as err:
+            print(f"Shutdown send error: {err}")
+
     @Slot(bool)
     def on_toggle_spectrum(self, enabled):
         self.spectrum_line.setVisible(enabled)
@@ -609,6 +679,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def on_mode_tab_changed(self, _index):
+        self.freq_list_panel.setVisible(self.mode_tabs.currentIndex() == 2)
         self._apply_current_range_to_visuals()
         if self.mode_tabs.currentIndex() == 0:
             self.btn_run.setText("SVEP")
@@ -621,12 +692,46 @@ class MainWindow(QMainWindow):
     def _parse_float(text):
         return float(str(text).replace(',', '.'))
 
-    def _parse_scan_centers_mhz(self):
-        text = str(self.scan_centers_input.text()).strip()
-        if not text:
-            return []
-        matches = re.findall(r"[-+]?\d+(?:[.,]\d+)?", text)
+    def _extract_center_values(self, text):
+        matches = re.findall(r"[-+]?\d+(?:[.,]\d+)?", str(text))
         return [self._parse_float(v) for v in matches]
+
+    def _populate_scan_center_list(self, text):
+        self.scan_center_list.clear()
+        for value in self._extract_center_values(text):
+            self.scan_center_list.addItem(f"{value:.6f}".rstrip("0").rstrip("."))
+
+    def add_scan_center_from_input(self):
+        raw = self.scan_center_add_input.text().strip()
+        if not raw:
+            return
+        try:
+            freq = self._parse_float(raw)
+        except Exception:
+            print(f"Ogiltig frekvens: {raw}")
+            return
+        self.scan_center_list.addItem(f"{freq:.6f}".rstrip("0").rstrip("."))
+        self.scan_center_add_input.clear()
+
+    def remove_selected_scan_center(self):
+        row = self.scan_center_list.currentRow()
+        if row >= 0:
+            self.scan_center_list.takeItem(row)
+
+    def clear_scan_centers(self):
+        self.scan_center_list.clear()
+
+    def _parse_scan_centers_mhz(self):
+        values = []
+        for i in range(self.scan_center_list.count()):
+            item = self.scan_center_list.item(i)
+            if not item:
+                continue
+            try:
+                values.append(self._parse_float(item.text()))
+            except Exception:
+                continue
+        return values
 
     def _get_current_mode(self):
         idx = self.mode_tabs.currentIndex()
@@ -709,6 +814,8 @@ class MainWindow(QMainWindow):
 
     async def network_worker(self):
         while True:
+            if self.requested_server_shutdown:
+                return
             try:
                 async with websockets.connect(self.remote_url) as ws:
                     self.ws = ws
@@ -718,10 +825,21 @@ class MainWindow(QMainWindow):
                     except Exception as err:
                         print(f"Init send error: {err}")
                     while True:
+                        if self.requested_server_shutdown:
+                            return
                         data = await ws.recv()
                         if isinstance(data, bytes):
                             self.data_received.emit(data)
+                        elif isinstance(data, str):
+                            try:
+                                msg = json.loads(data)
+                                if msg.get("event") == "server_shutdown":
+                                    print("Servern har bekräftat shutdown.")
+                            except Exception:
+                                pass
             except:
+                if self.requested_server_shutdown:
+                    return
                 await asyncio.sleep(2)
 
     def send_settings(self):

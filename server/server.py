@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 sdr = RtlSdr()
 sdr.gain = 'auto'
+shutdown_event = None
 
 # Globalt tillstånd för scanningen
 state = {
@@ -119,20 +120,32 @@ def get_clean_spectrum(samples, fft_size, visible_bw, sample_rate):
 
 
 async def sdr_handler(websocket):
+    global shutdown_event
     logger.info(f"Klient ansluten {str(websocket.remote_address)}")
     try:
-        while True:
+        while not shutdown_event.is_set():
             # 1. Kolla efter nya parametrar
             try:
                 msg = await asyncio.wait_for(websocket.recv(), timeout=0.01)
                 data = json.loads(msg)
                 if isinstance(data, dict):
+                    if bool(data.get("shutdown")):
+                        logger.info("Shutdown-begäran mottagen från klient.")
+                        shutdown_event.set()
+                        try:
+                            await websocket.send(json.dumps({"event": "server_shutdown"}))
+                        except:
+                            pass
+                        break
                     _update_state_from_payload(data)
 
                 sdr.sample_rate = state["sample_rate"]
                 logger.info(f"{str(websocket.remote_address)} Uppdaterad konfig: {state}")
             except:
                 pass
+
+            if shutdown_event.is_set():
+                break
 
             if state["paused"]:
                 await asyncio.sleep(0.05)
@@ -155,6 +168,8 @@ async def sdr_handler(websocket):
                 bandwidth = min(float(state["bandwidth"]), float(state["sample_rate"]))
                 dwell_time = max(0.001, float(state.get("dwell_time", 0.08)))
                 for center in centers:
+                    if shutdown_event.is_set():
+                        break
                     sdr.center_freq = center
                     await asyncio.sleep(dwell_time)
                     samples = sdr.read_samples(state["fft_size"])
@@ -171,6 +186,8 @@ async def sdr_handler(websocket):
 
                 # 2. Scanning-loop
                 while curr <= stop:
+                    if shutdown_event.is_set():
+                        break
                     sdr.center_freq = curr
                     await asyncio.sleep(0.01)  # Snabbare switch för live-känsla
 
@@ -190,9 +207,20 @@ async def sdr_handler(websocket):
 
 
 async def main():
-    async with websockets.serve(sdr_handler, "0.0.0.0", 8765):
+    global shutdown_event
+    shutdown_event = asyncio.Event()
+    server = await websockets.serve(sdr_handler, "0.0.0.0", 8765)
+    try:
         logger.info("Server redo...")
-        await asyncio.Future()
+        await shutdown_event.wait()
+        logger.info("Stänger ner server...")
+    finally:
+        server.close()
+        await server.wait_closed()
+        try:
+            sdr.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
