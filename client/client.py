@@ -5,7 +5,7 @@ import threading
 import math
 import argparse
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog)
+                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
@@ -285,7 +285,7 @@ class SpectrumLineWidget(QWidget):
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
 
-    def __init__(self, remote_url, start_mhz, stop_mhz, step_mhz, fft_size):
+    def __init__(self, remote_url, start_mhz, stop_mhz, step_mhz, fft_size, initial_mode="sweep", center_mhz=None, bandwidth_mhz=None):
         super().__init__()
         self.remote_url = remote_url
         self.setWindowTitle("Gemini SDR Visualizer")
@@ -294,6 +294,10 @@ class MainWindow(QMainWindow):
         self.auto_noise_enabled = False
         self.auto_noise_estimate = None
         self.is_paused = False
+        default_center = (start_mhz + stop_mhz) / 2.0 if center_mhz is None else float(center_mhz)
+        default_bandwidth = abs(stop_mhz - start_mhz) if bandwidth_mhz is None else float(bandwidth_mhz)
+        if default_bandwidth <= 0:
+            default_bandwidth = max(0.1, float(step_mhz))
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -307,15 +311,44 @@ class MainWindow(QMainWindow):
         
         self.start_input = QLineEdit(f"{start_mhz:g}")
         self.stop_input = QLineEdit(f"{stop_mhz:g}")
-        for inp in [self.start_input, self.stop_input]: inp.setFixedWidth(60)
-        
+        self.step_input = QLineEdit(f"{step_mhz:g}")
+        self.center_input = QLineEdit(f"{default_center:g}")
+        self.bandwidth_input = QLineEdit(f"{default_bandwidth:g}")
+        for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input]:
+            inp.setFixedWidth(65)
+        self.step_input.setFixedWidth(55)
+
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.setDocumentMode(True)
+
+        sweep_tab = QWidget()
+        sweep_layout = QHBoxLayout(sweep_tab)
+        sweep_layout.setContentsMargins(8, 6, 8, 6)
+        sweep_layout.addWidget(QLabel("Start (MHz):"))
+        sweep_layout.addWidget(self.start_input)
+        sweep_layout.addWidget(QLabel("Stopp:"))
+        sweep_layout.addWidget(self.stop_input)
+        sweep_layout.addWidget(QLabel("Steg:"))
+        sweep_layout.addWidget(self.step_input)
+        sweep_layout.addStretch()
+
+        fixed_tab = QWidget()
+        fixed_layout = QHBoxLayout(fixed_tab)
+        fixed_layout.setContentsMargins(8, 6, 8, 6)
+        fixed_layout.addWidget(QLabel("Center (MHz):"))
+        fixed_layout.addWidget(self.center_input)
+        fixed_layout.addWidget(QLabel("Bandbredd (MHz):"))
+        fixed_layout.addWidget(self.bandwidth_input)
+        fixed_layout.addStretch()
+
+        self.mode_tabs.addTab(sweep_tab, "Svep")
+        self.mode_tabs.addTab(fixed_tab, "Fast center")
+        self.mode_tabs.currentChanged.connect(self.on_mode_tab_changed)
+
         self.fft_combo = QComboBox()
         self.fft_combo.addItems(["256","512", "1024", "2048", "4096"])
         self.fft_combo.setCurrentText(str(fft_size))
-        
-        self.step_input = QLineEdit(f"{step_mhz:g}")
-        self.step_input.setFixedWidth(40)
-        
+
         self.thresh_slider = QSlider(Qt.Horizontal)
         self.thresh_slider.setRange(0, 255)
         self.thresh_slider.setValue(45)
@@ -327,7 +360,7 @@ class MainWindow(QMainWindow):
         self.chk_auto_noise.setChecked(False)
         self.chk_auto_noise.toggled.connect(self.on_toggle_auto_noise)
 
-        self.btn_run = QPushButton("SVEP")
+        self.btn_run = QPushButton("KÖR")
         self.btn_run.setStyleSheet("background-color: #0063b1; font-weight: bold; padding: 5px 15px; border-radius: 3px;")
         self.btn_run.clicked.connect(self.send_settings)
 
@@ -373,15 +406,11 @@ class MainWindow(QMainWindow):
         self.freq_pick_label = QLabel("Klickfrekvens: -")
         self.freq_pick_label.setFixedWidth(170)
 
-        ctrl_layout.addWidget(QLabel("Start (MHz):"))
-        ctrl_layout.addWidget(self.start_input)
-        ctrl_layout.addWidget(QLabel("Stopp:"))
-        ctrl_layout.addWidget(self.stop_input)
+        ctrl_layout.addWidget(self.mode_tabs, 1)
+        ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(QLabel("FFT:"))
         ctrl_layout.addWidget(self.fft_combo)
-        ctrl_layout.addWidget(QLabel("Steg:"))
-        ctrl_layout.addWidget(self.step_input)
-        ctrl_layout.addSpacing(20)
+        ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(QLabel("Brus:"))
         ctrl_layout.addWidget(self.thresh_slider)
         ctrl_layout.addWidget(self.thresh_label)
@@ -411,9 +440,11 @@ class MainWindow(QMainWindow):
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
         self.on_threshold_changed(self.thresh_slider.value())
-        self.ruler.set_range(start_mhz, stop_mhz)
-        self.spectrum_line.set_range(start_mhz, stop_mhz)
-        self.waterfall.set_range(start_mhz, stop_mhz)
+        if str(initial_mode).strip().lower() == "fixed":
+            self.mode_tabs.setCurrentIndex(1)
+        else:
+            self.mode_tabs.setCurrentIndex(0)
+        self._apply_current_range_to_visuals()
         self.waterfall.frequency_selected.connect(self.on_frequency_selected)
 
     @Slot(int)
@@ -504,15 +535,63 @@ class MainWindow(QMainWindow):
     def on_frequency_selected(self, freq_mhz):
         self.freq_pick_label.setText(f"Klickfrekvens: {freq_mhz:.3f} MHz")
 
+    @Slot(int)
+    def on_mode_tab_changed(self, _index):
+        self._apply_current_range_to_visuals()
+        if self.mode_tabs.currentIndex() == 0:
+            self.btn_run.setText("SVEP")
+        else:
+            self.btn_run.setText("KÖR FAST")
+
+    @staticmethod
+    def _parse_float(text):
+        return float(str(text).replace(',', '.'))
+
+    def _get_current_mode(self):
+        return "fixed" if self.mode_tabs.currentIndex() == 1 else "sweep"
+
+    def _get_current_range_mhz(self):
+        mode = self._get_current_mode()
+        if mode == "fixed":
+            center = self._parse_float(self.center_input.text())
+            bandwidth = max(0.001, self._parse_float(self.bandwidth_input.text()))
+            half_bw = bandwidth / 2.0
+            return center - half_bw, center + half_bw
+
+        start = self._parse_float(self.start_input.text())
+        stop = self._parse_float(self.stop_input.text())
+        if start <= stop:
+            return start, stop
+        return stop, start
+
+    def _apply_current_range_to_visuals(self):
+        try:
+            start_mhz, stop_mhz = self._get_current_range_mhz()
+        except Exception:
+            return
+        self.ruler.set_range(start_mhz, stop_mhz)
+        self.spectrum_line.set_range(start_mhz, stop_mhz)
+        self.waterfall.set_range(start_mhz, stop_mhz)
+
     def _build_settings_payload(self):
-        s = float(self.start_input.text().replace(',', '.'))
-        e = float(self.stop_input.text().replace(',', '.'))
-        return {
-            "start": s * 1e6,
-            "stop": e * 1e6,
+        payload = {
+            "mode": self._get_current_mode(),
             "fft_size": int(self.fft_combo.currentText()),
-            "step_size": float(self.step_input.text().replace(',', '.')) * 1e6
         }
+
+        if payload["mode"] == "fixed":
+            center_mhz = self._parse_float(self.center_input.text())
+            bandwidth_mhz = max(0.001, self._parse_float(self.bandwidth_input.text()))
+            payload["center"] = center_mhz * 1e6
+            payload["bandwidth"] = bandwidth_mhz * 1e6
+        else:
+            start_mhz = self._parse_float(self.start_input.text())
+            stop_mhz = self._parse_float(self.stop_input.text())
+            payload["start"] = start_mhz * 1e6
+            payload["stop"] = stop_mhz * 1e6
+            payload["step_size"] = max(0.001, self._parse_float(self.step_input.text())) * 1e6
+
+        return payload
 
     def start_async(self):
         asyncio.set_event_loop(self.loop)
@@ -538,11 +617,7 @@ class MainWindow(QMainWindow):
     def send_settings(self):
         try:
             payload = self._build_settings_payload()
-            s = payload["start"] / 1e6
-            e = payload["stop"] / 1e6
-            self.ruler.set_range(s, e)
-            self.spectrum_line.set_range(s, e)
-            self.waterfall.set_range(s, e)
+            self._apply_current_range_to_visuals()
             if self.ws:
                 msg = json.dumps(payload)
                 asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
@@ -573,12 +648,24 @@ if __name__ == "__main__":
     parser.add_argument("--start", type=float, default=88.0, help="Startfrekvens i MHz")
     parser.add_argument("--stop", type=float, default=108.0, help="Stoppfrekvens i MHz")
     parser.add_argument("--step", type=float, default=1.5, help="Stegstorlek i MHz")
+    parser.add_argument("--mode", choices=["sweep", "fixed"], default="sweep", help="Läge: svep eller fast center")
+    parser.add_argument("--center", type=float, default=None, help="Centerfrekvens i MHz (fast-läge)")
+    parser.add_argument("--bandwidth", type=float, default=None, help="Bandbredd i MHz (fast-läge)")
     parser.add_argument("--fft", type=int, choices=[256, 512, 1024, 2048, 4096], default=1024, help="FFT-storlek")
     args = parser.parse_args()
     remote_url = normalize_remote_target(args.remote)
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    win = MainWindow(remote_url, args.start, args.stop, args.step, args.fft)
+    win = MainWindow(
+        remote_url,
+        args.start,
+        args.stop,
+        args.step,
+        args.fft,
+        initial_mode=args.mode,
+        center_mhz=args.center,
+        bandwidth_mhz=args.bandwidth,
+    )
     win.show()
     sys.exit(app.exec())
