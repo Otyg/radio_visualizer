@@ -337,7 +337,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.remote_url = remote_url
         self.setWindowTitle("Gemini SDR Visualizer")
-        self.resize(1200, 800)
+        desired_w, desired_h = 1200, 800
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            max_w = max(900, int(avail.width() * 0.95))
+            max_h = max(650, int(avail.height() * 0.95))
+            desired_w = min(desired_w, max_w)
+            desired_h = min(desired_h, max_h)
+            self.resize(desired_w, desired_h)
+            self.move(
+                avail.left() + max(0, (avail.width() - desired_w) // 2),
+                avail.top() + max(0, (avail.height() - desired_h) // 2),
+            )
+        else:
+            self.resize(desired_w, desired_h)
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
         self.auto_noise_enabled = False
         self.auto_noise_estimate = None
