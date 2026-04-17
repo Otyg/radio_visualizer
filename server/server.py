@@ -32,11 +32,13 @@ sdr.gain = 'auto'
 
 # Globalt tillstånd för scanningen
 state = {
-    "mode": "sweep",  # "sweep" eller "fixed"
+    "mode": "sweep",  # "sweep", "fixed" eller "list_scan"
     "start": 88e6,
     "stop": 108e6,
     "center": 98e6,
     "bandwidth": 20e6,
+    "scan_centers": [98e6],
+    "dwell_time": 0.08,
     "fft_size": 1024,
     "step_size": 1.5e6,
     "sample_rate": 2.4e6,
@@ -54,10 +56,24 @@ def _sanitize_positive(value, fallback):
     return value
 
 
+def _sanitize_frequency_list(values, fallback):
+    if not isinstance(values, list):
+        return list(fallback)
+    out = []
+    for item in values:
+        try:
+            out.append(float(item))
+        except Exception:
+            continue
+    if not out:
+        return list(fallback)
+    return out
+
+
 def _update_state_from_payload(data):
     if "mode" in data:
         mode = str(data["mode"]).strip().lower()
-        if mode in ("sweep", "fixed"):
+        if mode in ("sweep", "fixed", "list_scan"):
             state["mode"] = mode
 
     if "fft_size" in data:
@@ -77,6 +93,12 @@ def _update_state_from_payload(data):
 
     if "bandwidth" in data:
         state["bandwidth"] = _sanitize_positive(data["bandwidth"], state["bandwidth"])
+
+    if "scan_centers" in data:
+        state["scan_centers"] = _sanitize_frequency_list(data["scan_centers"], state["scan_centers"])
+
+    if "dwell_time" in data:
+        state["dwell_time"] = _sanitize_positive(data["dwell_time"], state["dwell_time"])
 
     if "sample_rate" in data:
         state["sample_rate"] = _sanitize_positive(data["sample_rate"], state["sample_rate"])
@@ -128,6 +150,17 @@ async def sdr_handler(websocket):
                 full_spectrum.append(
                     get_clean_spectrum(samples, state["fft_size"], bandwidth, state["sample_rate"])
                 )
+            elif mode == "list_scan":
+                centers = _sanitize_frequency_list(state.get("scan_centers", []), [float(state["center"])])
+                bandwidth = min(float(state["bandwidth"]), float(state["sample_rate"]))
+                dwell_time = max(0.001, float(state.get("dwell_time", 0.08)))
+                for center in centers:
+                    sdr.center_freq = center
+                    await asyncio.sleep(dwell_time)
+                    samples = sdr.read_samples(state["fft_size"])
+                    full_spectrum.append(
+                        get_clean_spectrum(samples, state["fft_size"], bandwidth, state["sample_rate"])
+                    )
             else:
                 curr = float(state["start"])
                 stop = float(state["stop"])

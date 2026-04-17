@@ -4,6 +4,7 @@ import asyncio
 import threading
 import math
 import argparse
+import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
@@ -69,6 +70,9 @@ class WaterfallWidget(QWidget):
         self.margin = 40
         self.start_f = 88.0
         self.stop_f = 108.0
+        self.view_mode = "continuous"
+        self.scan_centers = []
+        self.scan_bandwidth = 0.0
         self.color_lut = [self._rainbow_color(i / 255.0) for i in range(256)]
 
     @staticmethod
@@ -80,6 +84,23 @@ class WaterfallWidget(QWidget):
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = float(start_mhz)
         self.stop_f = float(stop_mhz)
+        self.view_mode = "continuous"
+        self.scan_centers = []
+        self.scan_bandwidth = 0.0
+        self.update()
+
+    def set_scan_columns(self, centers_mhz, bandwidth_mhz):
+        centers = [float(v) for v in centers_mhz]
+        if not centers:
+            self.set_range(self.start_f, self.stop_f)
+            return
+        bw = max(0.001, float(bandwidth_mhz))
+        self.view_mode = "column_scan"
+        self.scan_centers = centers
+        self.scan_bandwidth = bw
+        half_bw = bw / 2.0
+        self.start_f = min(centers) - half_bw
+        self.stop_f = max(centers) + half_bw
         self.update()
 
     def add_line(self, data_bytes, threshold):
@@ -131,6 +152,23 @@ class WaterfallWidget(QWidget):
         # Rita vattenfallet centrerat mellan marginalerna
         display_rect = QRect(self.margin, 0, self.width() - 2 * self.margin, self.height())
         painter.drawImage(display_rect, self.image)
+        if self.view_mode == "column_scan" and len(self.scan_centers) > 1 and display_rect.width() > 1:
+            columns = len(self.scan_centers)
+            sep_pen = QPen(QColor(140, 140, 140), 1)
+            sep_pen.setStyle(Qt.DashLine)
+            painter.setPen(sep_pen)
+            for idx in range(1, columns):
+                x = int(display_rect.left() + (idx / columns) * display_rect.width())
+                painter.drawLine(x, display_rect.top(), x, display_rect.bottom())
+        if self.view_mode == "column_scan" and self.scan_centers and display_rect.width() > 1:
+            columns = len(self.scan_centers)
+            painter.setFont(QFont("Arial", 8))
+            painter.setPen(QColor(230, 230, 230))
+            for idx, center in enumerate(self.scan_centers):
+                x0 = int(display_rect.left() + (idx / columns) * display_rect.width())
+                x1 = int(display_rect.left() + ((idx + 1) / columns) * display_rect.width())
+                label_rect = QRect(x0 + 2, display_rect.top() + 2, max(1, x1 - x0 - 4), 16)
+                painter.drawText(label_rect, Qt.AlignCenter, f"{center:.3f} MHz")
         # Ram
         painter.setPen(QColor(70, 70, 70))
         painter.drawRect(display_rect)
@@ -143,7 +181,17 @@ class WaterfallWidget(QWidget):
 
         rel_x = (event.position().x() - display_rect.left()) / max(1.0, float(display_rect.width()))
         rel_x = max(0.0, min(1.0, rel_x))
-        freq_mhz = self.start_f + rel_x * (self.stop_f - self.start_f)
+        if self.view_mode == "column_scan" and self.scan_centers:
+            columns = len(self.scan_centers)
+            bw = max(0.001, float(self.scan_bandwidth))
+            col_float = rel_x * columns
+            col_idx = min(columns - 1, int(col_float))
+            rel_in_col = col_float - col_idx
+            half_bw = bw / 2.0
+            center = self.scan_centers[col_idx]
+            freq_mhz = (center - half_bw) + rel_in_col * bw
+        else:
+            freq_mhz = self.start_f + rel_x * (self.stop_f - self.start_f)
         self.frequency_selected.emit(freq_mhz)
         super().mousePressEvent(event)
 
@@ -285,7 +333,7 @@ class SpectrumLineWidget(QWidget):
 class MainWindow(QMainWindow):
     data_received = Signal(bytes)
 
-    def __init__(self, remote_url, start_mhz, stop_mhz, step_mhz, fft_size, initial_mode="sweep", center_mhz=None, bandwidth_mhz=None):
+    def __init__(self, remote_url, start_mhz, stop_mhz, step_mhz, fft_size, initial_mode="sweep", center_mhz=None, bandwidth_mhz=None, scan_centers_csv=None, scan_bandwidth_mhz=None, scan_dwell_ms=None):
         super().__init__()
         self.remote_url = remote_url
         self.setWindowTitle("Gemini SDR Visualizer")
@@ -298,6 +346,13 @@ class MainWindow(QMainWindow):
         default_bandwidth = abs(stop_mhz - start_mhz) if bandwidth_mhz is None else float(bandwidth_mhz)
         if default_bandwidth <= 0:
             default_bandwidth = max(0.1, float(step_mhz))
+        default_scan_bandwidth = default_bandwidth if scan_bandwidth_mhz is None else float(scan_bandwidth_mhz)
+        if default_scan_bandwidth <= 0:
+            default_scan_bandwidth = max(0.1, float(step_mhz))
+        default_scan_dwell_ms = 80.0 if scan_dwell_ms is None else float(scan_dwell_ms)
+        if default_scan_dwell_ms <= 0:
+            default_scan_dwell_ms = 80.0
+        default_scan_centers = f"{default_center:g}" if scan_centers_csv is None else str(scan_centers_csv)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -314,9 +369,13 @@ class MainWindow(QMainWindow):
         self.step_input = QLineEdit(f"{step_mhz:g}")
         self.center_input = QLineEdit(f"{default_center:g}")
         self.bandwidth_input = QLineEdit(f"{default_bandwidth:g}")
-        for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input]:
+        self.scan_centers_input = QLineEdit(default_scan_centers)
+        self.scan_bandwidth_input = QLineEdit(f"{default_scan_bandwidth:g}")
+        self.scan_dwell_input = QLineEdit(f"{default_scan_dwell_ms:g}")
+        for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input, self.scan_bandwidth_input, self.scan_dwell_input]:
             inp.setFixedWidth(65)
         self.step_input.setFixedWidth(55)
+        self.scan_centers_input.setMinimumWidth(260)
 
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setDocumentMode(True)
@@ -343,6 +402,16 @@ class MainWindow(QMainWindow):
 
         self.mode_tabs.addTab(sweep_tab, "Svep")
         self.mode_tabs.addTab(fixed_tab, "Fast center")
+        scan_tab = QWidget()
+        scan_layout = QHBoxLayout(scan_tab)
+        scan_layout.setContentsMargins(8, 6, 8, 6)
+        scan_layout.addWidget(QLabel("Frekvenslista (MHz):"))
+        scan_layout.addWidget(self.scan_centers_input, 1)
+        scan_layout.addWidget(QLabel("Global bandbredd (MHz):"))
+        scan_layout.addWidget(self.scan_bandwidth_input)
+        scan_layout.addWidget(QLabel("Aktiv tid/frekvens (ms):"))
+        scan_layout.addWidget(self.scan_dwell_input)
+        self.mode_tabs.addTab(scan_tab, "Scannerlista")
         self.mode_tabs.currentChanged.connect(self.on_mode_tab_changed)
 
         self.fft_combo = QComboBox()
@@ -440,8 +509,11 @@ class MainWindow(QMainWindow):
         self.data_received.connect(self.on_data_received)
         threading.Thread(target=self.start_async, daemon=True).start()
         self.on_threshold_changed(self.thresh_slider.value())
-        if str(initial_mode).strip().lower() == "fixed":
+        mode = str(initial_mode).strip().lower()
+        if mode == "fixed":
             self.mode_tabs.setCurrentIndex(1)
+        elif mode in ("list_scan", "scan_list", "scanner"):
+            self.mode_tabs.setCurrentIndex(2)
         else:
             self.mode_tabs.setCurrentIndex(0)
         self._apply_current_range_to_visuals()
@@ -540,15 +612,29 @@ class MainWindow(QMainWindow):
         self._apply_current_range_to_visuals()
         if self.mode_tabs.currentIndex() == 0:
             self.btn_run.setText("SVEP")
-        else:
+        elif self.mode_tabs.currentIndex() == 1:
             self.btn_run.setText("KÖR FAST")
+        else:
+            self.btn_run.setText("KÖR LISTA")
 
     @staticmethod
     def _parse_float(text):
         return float(str(text).replace(',', '.'))
 
+    def _parse_scan_centers_mhz(self):
+        text = str(self.scan_centers_input.text()).strip()
+        if not text:
+            return []
+        matches = re.findall(r"[-+]?\d+(?:[.,]\d+)?", text)
+        return [self._parse_float(v) for v in matches]
+
     def _get_current_mode(self):
-        return "fixed" if self.mode_tabs.currentIndex() == 1 else "sweep"
+        idx = self.mode_tabs.currentIndex()
+        if idx == 1:
+            return "fixed"
+        if idx == 2:
+            return "list_scan"
+        return "sweep"
 
     def _get_current_range_mhz(self):
         mode = self._get_current_mode()
@@ -557,6 +643,13 @@ class MainWindow(QMainWindow):
             bandwidth = max(0.001, self._parse_float(self.bandwidth_input.text()))
             half_bw = bandwidth / 2.0
             return center - half_bw, center + half_bw
+        if mode == "list_scan":
+            centers = self._parse_scan_centers_mhz()
+            if not centers:
+                raise ValueError("Ingen frekvens i listscan-läge")
+            bandwidth = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
+            half_bw = bandwidth / 2.0
+            return min(centers) - half_bw, max(centers) + half_bw
 
         start = self._parse_float(self.start_input.text())
         stop = self._parse_float(self.stop_input.text())
@@ -571,7 +664,15 @@ class MainWindow(QMainWindow):
             return
         self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
-        self.waterfall.set_range(start_mhz, stop_mhz)
+        if self._get_current_mode() == "list_scan":
+            try:
+                centers = self._parse_scan_centers_mhz()
+                bandwidth = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
+                self.waterfall.set_scan_columns(centers, bandwidth)
+            except Exception:
+                self.waterfall.set_range(start_mhz, stop_mhz)
+        else:
+            self.waterfall.set_range(start_mhz, stop_mhz)
 
     def _build_settings_payload(self):
         payload = {
@@ -584,6 +685,15 @@ class MainWindow(QMainWindow):
             bandwidth_mhz = max(0.001, self._parse_float(self.bandwidth_input.text()))
             payload["center"] = center_mhz * 1e6
             payload["bandwidth"] = bandwidth_mhz * 1e6
+        elif payload["mode"] == "list_scan":
+            centers_mhz = self._parse_scan_centers_mhz()
+            if not centers_mhz:
+                raise ValueError("Minst en frekvens krävs i scannerlista")
+            bandwidth_mhz = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
+            dwell_ms = max(1.0, self._parse_float(self.scan_dwell_input.text()))
+            payload["scan_centers"] = [v * 1e6 for v in centers_mhz]
+            payload["bandwidth"] = bandwidth_mhz * 1e6
+            payload["dwell_time"] = dwell_ms / 1000.0
         else:
             start_mhz = self._parse_float(self.start_input.text())
             stop_mhz = self._parse_float(self.stop_input.text())
@@ -648,9 +758,12 @@ if __name__ == "__main__":
     parser.add_argument("--start", type=float, default=88.0, help="Startfrekvens i MHz")
     parser.add_argument("--stop", type=float, default=108.0, help="Stoppfrekvens i MHz")
     parser.add_argument("--step", type=float, default=1.5, help="Stegstorlek i MHz")
-    parser.add_argument("--mode", choices=["sweep", "fixed"], default="sweep", help="Läge: svep eller fast center")
+    parser.add_argument("--mode", choices=["sweep", "fixed", "list_scan"], default="sweep", help="Läge: svep, fast center eller scannerlista")
     parser.add_argument("--center", type=float, default=None, help="Centerfrekvens i MHz (fast-läge)")
     parser.add_argument("--bandwidth", type=float, default=None, help="Bandbredd i MHz (fast-läge)")
+    parser.add_argument("--scan-centers", default=None, help="Kommaseparerad centerlista i MHz (scannerlista)")
+    parser.add_argument("--scan-bandwidth", type=float, default=None, help="Bandbredd i MHz per center (scannerlista)")
+    parser.add_argument("--scan-dwell-ms", type=float, default=None, help="Aktiv tid i millisekunder per frekvens (scannerlista)")
     parser.add_argument("--fft", type=int, choices=[256, 512, 1024, 2048, 4096], default=1024, help="FFT-storlek")
     args = parser.parse_args()
     remote_url = normalize_remote_target(args.remote)
@@ -666,6 +779,9 @@ if __name__ == "__main__":
         initial_mode=args.mode,
         center_mhz=args.center,
         bandwidth_mhz=args.bandwidth,
+        scan_centers_csv=args.scan_centers,
+        scan_bandwidth_mhz=args.scan_bandwidth,
+        scan_dwell_ms=args.scan_dwell_ms,
     )
     win.show()
     sys.exit(app.exec())
