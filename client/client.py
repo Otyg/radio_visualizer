@@ -4,9 +4,8 @@ import asyncio
 import threading
 import math
 import argparse
-import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget, QMessageBox, QListWidget)
+                             QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget, QMessageBox, QGridLayout, QFrame)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
 from PySide6.QtCore import Qt, Signal, Slot, QRect
 
@@ -195,6 +194,175 @@ class WaterfallWidget(QWidget):
         self.frequency_selected.emit(freq_mhz)
         super().mousePressEvent(event)
 
+
+class MiniWaterfallWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(110)
+        self.image = QImage(256, 300, QImage.Format_RGB32)
+        self.image.fill(Qt.black)
+        self.current_row = 0
+        self.color_lut = [WaterfallWidget._rainbow_color(i / 255.0) for i in range(256)]
+
+    def clear(self):
+        self.image.fill(Qt.black)
+        self.current_row = 0
+        self.update()
+
+    def add_line(self, data_bytes, threshold):
+        width = len(data_bytes)
+        if width <= 0:
+            return
+        if self.image.width() != width:
+            self.image = QImage(width, 300, QImage.Format_RGB32)
+            self.image.fill(Qt.black)
+            self.current_row = 0
+
+        thr = max(0, min(255, int(threshold)))
+        for x in range(width):
+            val = data_bytes[x]
+            if val < thr:
+                self.image.setPixelColor(x, self.current_row, QColor(0, 0, 0))
+            else:
+                nv = int(((val - thr) / max(1, (255 - thr))) * 255)
+                nv = max(0, min(255, nv))
+                self.image.setPixelColor(x, self.current_row, self.color_lut[nv])
+
+        self.current_row = (self.current_row + 1) % self.image.height()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(14, 14, 14))
+        draw_rect = self.rect().adjusted(1, 1, -1, -1)
+        if draw_rect.width() <= 1 or draw_rect.height() <= 1:
+            return
+        painter.drawImage(draw_rect, self.image)
+        painter.setPen(QColor(70, 70, 70))
+        painter.drawRect(draw_rect)
+
+
+class ScanChannelTile(QFrame):
+    def __init__(self, index, default_freq_mhz, default_bandwidth_mhz):
+        super().__init__()
+        self.index = int(index)
+        self.auto_noise_estimate = None
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("QFrame { background-color: #1b1b1b; border: 1px solid #3b3b3b; border-radius: 4px; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        title = QLabel(f"Kanal {self.index + 1}")
+        title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(title)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+        row1.addWidget(QLabel("MHz:"))
+        self.freq_input = QLineEdit(f"{float(default_freq_mhz):g}")
+        self.freq_input.setFixedWidth(70)
+        row1.addWidget(self.freq_input)
+        row1.addWidget(QLabel("BW:"))
+        self.bandwidth_input = QLineEdit(f"{float(default_bandwidth_mhz):g}")
+        self.bandwidth_input.setFixedWidth(62)
+        row1.addWidget(self.bandwidth_input)
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+        self.active_check = QCheckBox("Aktiv")
+        self.active_check.setChecked(self.index == 0)
+        row2.addWidget(self.active_check)
+        self.auto_noise_check = QCheckBox("Auto brus")
+        self.auto_noise_check.setChecked(False)
+        self.auto_noise_check.toggled.connect(self._on_toggle_auto_noise)
+        row2.addWidget(self.auto_noise_check)
+        row2.addWidget(QLabel("Brus dB:"))
+        self.noise_db_input = QLineEdit("-35")
+        self.noise_db_input.setFixedWidth(56)
+        row2.addWidget(self.noise_db_input)
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        self.waterfall = MiniWaterfallWidget()
+        layout.addWidget(self.waterfall, 1)
+
+    def _on_toggle_auto_noise(self, enabled):
+        if enabled:
+            self.auto_noise_estimate = None
+
+    @staticmethod
+    def _parse_float(text, fallback):
+        try:
+            return float(str(text).replace(",", "."))
+        except Exception:
+            return float(fallback)
+
+    @staticmethod
+    def _percentile_from_hist(hist, total, percentile):
+        if total <= 0:
+            return 0
+        target = int(round((percentile / 100.0) * (total - 1)))
+        running = 0
+        for value, count in enumerate(hist):
+            running += count
+            if running > target:
+                return value
+        return 255
+
+    def _noise_db_to_threshold(self):
+        noise_db = self._parse_float(self.noise_db_input.text(), -35.0)
+        return int(max(0, min(255, round((noise_db + 60.0) * 3.0))))
+
+    def _estimate_auto_threshold(self, data):
+        hist = [0] * 256
+        for value in data:
+            hist[value] += 1
+        total = len(data)
+        p50 = self._percentile_from_hist(hist, total, 50)
+        p90 = self._percentile_from_hist(hist, total, 90)
+        spread = max(1, p90 - p50)
+        raw_target = p50 + int(0.45 * spread) + 10
+        raw_target = max(0, min(255, raw_target))
+        if self.auto_noise_estimate is None:
+            self.auto_noise_estimate = float(raw_target)
+        else:
+            self.auto_noise_estimate = 0.70 * self.auto_noise_estimate + 0.30 * raw_target
+        return int(round(self.auto_noise_estimate))
+
+    def get_config(self):
+        freq_mhz = self._parse_float(self.freq_input.text(), 100.0)
+        bandwidth_mhz = max(0.001, self._parse_float(self.bandwidth_input.text(), 0.2))
+        noise_reduction_db = self._parse_float(self.noise_db_input.text(), -35.0)
+        return {
+            "center_mhz": freq_mhz,
+            "bandwidth_mhz": bandwidth_mhz,
+            "active": bool(self.active_check.isChecked()),
+            "auto_noise": bool(self.auto_noise_check.isChecked()),
+            "noise_reduction_db": noise_reduction_db,
+        }
+
+    def set_config(self, cfg):
+        if not isinstance(cfg, dict):
+            return
+        freq_mhz = self._parse_float(cfg.get("center_mhz", self.freq_input.text()), self.freq_input.text())
+        bandwidth_mhz = max(0.001, self._parse_float(cfg.get("bandwidth_mhz", self.bandwidth_input.text()), self.bandwidth_input.text()))
+        noise_reduction_db = self._parse_float(cfg.get("noise_reduction_db", self.noise_db_input.text()), self.noise_db_input.text())
+        self.freq_input.setText(f"{freq_mhz:g}")
+        self.bandwidth_input.setText(f"{bandwidth_mhz:g}")
+        self.active_check.setChecked(bool(cfg.get("active", self.active_check.isChecked())))
+        self.auto_noise_check.setChecked(bool(cfg.get("auto_noise", self.auto_noise_check.isChecked())))
+        self.noise_db_input.setText(f"{noise_reduction_db:g}")
+
+    def consume_spectrum(self, data):
+        if not data:
+            return
+        threshold = self._estimate_auto_threshold(data) if self.auto_noise_check.isChecked() else self._noise_db_to_threshold()
+        self.waterfall.add_line(data, threshold)
+
 class SpectrumLineWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -367,7 +535,8 @@ class MainWindow(QMainWindow):
         default_scan_dwell_ms = 80.0 if scan_dwell_ms is None else float(scan_dwell_ms)
         if default_scan_dwell_ms <= 0:
             default_scan_dwell_ms = 80.0
-        default_scan_centers = f"{default_center:g}" if scan_centers_csv is None else str(scan_centers_csv)
+        self.scan_channel_count = 15
+        self.server_sample_rate_hz = 2.4e6
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -384,14 +553,10 @@ class MainWindow(QMainWindow):
         self.step_input = QLineEdit(f"{step_mhz:g}")
         self.center_input = QLineEdit(f"{default_center:g}")
         self.bandwidth_input = QLineEdit(f"{default_bandwidth:g}")
-        self.scan_bandwidth_input = QLineEdit(f"{default_scan_bandwidth:g}")
         self.scan_dwell_input = QLineEdit(f"{default_scan_dwell_ms:g}")
-        self.scan_center_add_input = QLineEdit("")
-        self.scan_center_add_input.setPlaceholderText("Lägg till MHz")
-        for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input, self.scan_bandwidth_input, self.scan_dwell_input]:
+        for inp in [self.start_input, self.stop_input, self.center_input, self.bandwidth_input, self.scan_dwell_input]:
             inp.setFixedWidth(65)
         self.step_input.setFixedWidth(55)
-        self.scan_center_add_input.setMinimumWidth(110)
 
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setDocumentMode(True)
@@ -421,13 +586,16 @@ class MainWindow(QMainWindow):
         scan_tab = QWidget()
         scan_layout = QHBoxLayout(scan_tab)
         scan_layout.setContentsMargins(8, 6, 8, 6)
-        scan_layout.addWidget(QLabel("Frekvenser hanteras i listpanelen till höger."))
-        scan_layout.addWidget(QLabel("Global bandbredd (MHz):"))
-        scan_layout.addWidget(self.scan_bandwidth_input)
         scan_layout.addWidget(QLabel("Aktiv tid/frekvens (ms):"))
         scan_layout.addWidget(self.scan_dwell_input)
+        self.btn_save_scan = QPushButton("Spara")
+        self.btn_load_scan = QPushButton("Ladda")
+        self.btn_save_scan.clicked.connect(self.save_scan_profile)
+        self.btn_load_scan.clicked.connect(self.load_scan_profile)
+        scan_layout.addWidget(self.btn_save_scan)
+        scan_layout.addWidget(self.btn_load_scan)
         scan_layout.addStretch()
-        self.mode_tabs.addTab(scan_tab, "Scannerlista")
+        self.mode_tabs.addTab(scan_tab, "Scanner")
         self.mode_tabs.currentChanged.connect(self.on_mode_tab_changed)
 
         self.fft_combo = QComboBox()
@@ -518,36 +686,17 @@ class MainWindow(QMainWindow):
         self.spectrum_line = SpectrumLineWidget()
         self.ruler = FrequencyRuler()
         self.waterfall = WaterfallWidget()
-
-        self.freq_list_panel = QWidget()
-        self.freq_list_panel.setMinimumWidth(250)
-        self.freq_list_panel.setMaximumWidth(320)
-        freq_panel_layout = QVBoxLayout(self.freq_list_panel)
-        freq_panel_layout.setContentsMargins(8, 0, 10, 0)
-        freq_panel_layout.setSpacing(8)
-        freq_panel_layout.addWidget(QLabel("Scannerfrekvenser (MHz)"))
-        self.scan_center_list = QListWidget()
-        self.scan_center_list.setAlternatingRowColors(True)
-        freq_panel_layout.addWidget(self.scan_center_list, 1)
-
-        add_row = QHBoxLayout()
-        self.btn_add_scan_center = QPushButton("Lägg till")
-        self.btn_add_scan_center.clicked.connect(self.add_scan_center_from_input)
-        add_row.addWidget(self.scan_center_add_input, 1)
-        add_row.addWidget(self.btn_add_scan_center)
-        freq_panel_layout.addLayout(add_row)
-
-        action_row = QHBoxLayout()
-        self.btn_remove_scan_center = QPushButton("Ta bort vald")
-        self.btn_remove_scan_center.clicked.connect(self.remove_selected_scan_center)
-        self.btn_clear_scan_centers = QPushButton("Töm lista")
-        self.btn_clear_scan_centers.clicked.connect(self.clear_scan_centers)
-        action_row.addWidget(self.btn_remove_scan_center)
-        action_row.addWidget(self.btn_clear_scan_centers)
-        freq_panel_layout.addLayout(action_row)
-
-        self.scan_center_add_input.returnPressed.connect(self.add_scan_center_from_input)
-        self._populate_scan_center_list(default_scan_centers)
+        self.scanner_grid = QWidget()
+        self.scanner_grid_layout = QGridLayout(self.scanner_grid)
+        self.scanner_grid_layout.setContentsMargins(4, 4, 4, 4)
+        self.scanner_grid_layout.setSpacing(6)
+        self.scan_channel_tiles = []
+        for idx, freq_mhz in enumerate(self._default_scan_channel_frequencies(start_mhz, stop_mhz, scan_centers_csv)):
+            tile = ScanChannelTile(idx, freq_mhz, default_scan_bandwidth)
+            self.scan_channel_tiles.append(tile)
+            row = idx // 5
+            col = idx % 5
+            self.scanner_grid_layout.addWidget(tile, row, col)
 
         viz_container = QWidget()
         viz_layout = QVBoxLayout(viz_container)
@@ -556,14 +705,10 @@ class MainWindow(QMainWindow):
         viz_layout.addWidget(self.spectrum_line)
         viz_layout.addWidget(self.ruler)
         viz_layout.addWidget(self.waterfall, 1)
+        viz_layout.addWidget(self.scanner_grid, 1)
 
         main_layout.addLayout(ctrl_layout)
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(6)
-        content_layout.addWidget(viz_container, 1)
-        content_layout.addWidget(self.freq_list_panel)
-        main_layout.addLayout(content_layout, 1)
+        main_layout.addWidget(viz_container, 1)
         
         # Nätverk
         self.loop = asyncio.new_event_loop()
@@ -578,9 +723,9 @@ class MainWindow(QMainWindow):
             self.mode_tabs.setCurrentIndex(2)
         else:
             self.mode_tabs.setCurrentIndex(0)
-        self.freq_list_panel.setVisible(self.mode_tabs.currentIndex() == 2)
         self._apply_current_range_to_visuals()
         self.waterfall.frequency_selected.connect(self.on_frequency_selected)
+        self._sync_visual_mode()
 
     @Slot(int)
     def on_threshold_changed(self, value):
@@ -634,10 +779,15 @@ class MainWindow(QMainWindow):
     def on_data_received(self, data):
         if self.is_paused:
             return
-        if self.auto_noise_enabled:
+        scanner_mode = self._get_current_mode() == "list_scan"
+        if self.auto_noise_enabled and not scanner_mode:
             self._update_auto_noise_threshold(data)
         if self.chk_spectrum.isChecked():
             self.spectrum_line.set_data(data)
+        if scanner_mode:
+            if self.chk_waterfall.isChecked():
+                self._route_scan_data_to_tiles(data)
+            return
         if self.chk_waterfall.isChecked():
             wrapped = self.waterfall.add_line(data, self.thresh_slider.value())
             if wrapped:
@@ -685,7 +835,7 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def on_toggle_waterfall(self, enabled):
-        self.waterfall.setVisible(enabled)
+        self._sync_visual_mode()
 
     @Slot(float)
     def on_frequency_selected(self, freq_mhz):
@@ -693,59 +843,111 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def on_mode_tab_changed(self, _index):
-        self.freq_list_panel.setVisible(self.mode_tabs.currentIndex() == 2)
+        self._sync_visual_mode()
         self._apply_current_range_to_visuals()
         if self.mode_tabs.currentIndex() == 0:
             self.btn_run.setText("SVEP")
         elif self.mode_tabs.currentIndex() == 1:
             self.btn_run.setText("KÖR FAST")
         else:
-            self.btn_run.setText("KÖR LISTA")
+            self.btn_run.setText("KÖR SCANNER")
 
     @staticmethod
     def _parse_float(text):
         return float(str(text).replace(',', '.'))
 
     def _extract_center_values(self, text):
-        matches = re.findall(r"[-+]?\d+(?:[.,]\d+)?", str(text))
-        return [self._parse_float(v) for v in matches]
-
-    def _populate_scan_center_list(self, text):
-        self.scan_center_list.clear()
-        for value in self._extract_center_values(text):
-            self.scan_center_list.addItem(f"{value:.6f}".rstrip("0").rstrip("."))
-
-    def add_scan_center_from_input(self):
-        raw = self.scan_center_add_input.text().strip()
-        if not raw:
-            return
-        try:
-            freq = self._parse_float(raw)
-        except Exception:
-            print(f"Ogiltig frekvens: {raw}")
-            return
-        self.scan_center_list.addItem(f"{freq:.6f}".rstrip("0").rstrip("."))
-        self.scan_center_add_input.clear()
-
-    def remove_selected_scan_center(self):
-        row = self.scan_center_list.currentRow()
-        if row >= 0:
-            self.scan_center_list.takeItem(row)
-
-    def clear_scan_centers(self):
-        self.scan_center_list.clear()
-
-    def _parse_scan_centers_mhz(self):
+        if text is None:
+            return []
         values = []
-        for i in range(self.scan_center_list.count()):
-            item = self.scan_center_list.item(i)
-            if not item:
+        for raw in str(text).replace(";", ",").split(","):
+            raw = raw.strip()
+            if not raw:
                 continue
             try:
-                values.append(self._parse_float(item.text()))
+                values.append(self._parse_float(raw))
             except Exception:
                 continue
         return values
+
+    def _default_scan_channel_frequencies(self, start_mhz, stop_mhz, scan_centers_csv):
+        parsed = self._extract_center_values(scan_centers_csv)
+        if parsed:
+            values = parsed[:self.scan_channel_count]
+            while len(values) < self.scan_channel_count:
+                values.append(values[-1])
+            return values
+        low = min(float(start_mhz), float(stop_mhz))
+        high = max(float(start_mhz), float(stop_mhz))
+        if math.isclose(low, high):
+            return [low for _ in range(self.scan_channel_count)]
+        values = []
+        for idx in range(self.scan_channel_count):
+            frac = idx / max(1, self.scan_channel_count - 1)
+            values.append(low + frac * (high - low))
+        return values
+
+    def _collect_scan_channels(self):
+        channels = []
+        for tile in self.scan_channel_tiles:
+            channels.append(tile.get_config())
+        return channels
+
+    def save_scan_profile(self):
+        payload = {
+            "version": 1,
+            "dwell_time_ms": max(1.0, self._parse_float(self.scan_dwell_input.text())),
+            "channels": self._collect_scan_channels(),
+        }
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Spara scannerprofil",
+            "scanner_profile.json",
+            "JSON-filer (*.json);;Alla filer (*)",
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as err:
+            print(f"Kunde inte spara profil: {err}")
+
+    def load_scan_profile(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Ladda scannerprofil",
+            "",
+            "JSON-filer (*.json);;Alla filer (*)",
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as err:
+            print(f"Kunde inte läsa profil: {err}")
+            return
+
+        if not isinstance(payload, dict):
+            print("Ogiltig profil: JSON-roten måste vara ett objekt.")
+            return
+
+        dwell_ms = payload.get("dwell_time_ms")
+        if dwell_ms is not None:
+            try:
+                dwell_ms = max(1.0, self._parse_float(dwell_ms))
+                self.scan_dwell_input.setText(f"{dwell_ms:g}")
+            except Exception:
+                pass
+
+        channels = payload.get("channels")
+        if isinstance(channels, list):
+            for idx, tile in enumerate(self.scan_channel_tiles):
+                if idx < len(channels):
+                    tile.set_config(channels[idx])
+        self._apply_current_range_to_visuals()
+        self._sync_visual_mode()
 
     def _get_current_mode(self):
         idx = self.mode_tabs.currentIndex()
@@ -763,12 +965,14 @@ class MainWindow(QMainWindow):
             half_bw = bandwidth / 2.0
             return center - half_bw, center + half_bw
         if mode == "list_scan":
-            centers = self._parse_scan_centers_mhz()
-            if not centers:
-                raise ValueError("Ingen frekvens i listscan-läge")
-            bandwidth = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
-            half_bw = bandwidth / 2.0
-            return min(centers) - half_bw, max(centers) + half_bw
+            channels = self._collect_scan_channels()
+            active = [ch for ch in channels if ch["active"]]
+            selected = active if active else channels
+            if not selected:
+                raise ValueError("Inga scannerkanaler")
+            lo = min(ch["center_mhz"] - (ch["bandwidth_mhz"] / 2.0) for ch in selected)
+            hi = max(ch["center_mhz"] + (ch["bandwidth_mhz"] / 2.0) for ch in selected)
+            return lo, hi
 
         start = self._parse_float(self.start_input.text())
         stop = self._parse_float(self.stop_input.text())
@@ -783,15 +987,43 @@ class MainWindow(QMainWindow):
             return
         self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
-        if self._get_current_mode() == "list_scan":
-            try:
-                centers = self._parse_scan_centers_mhz()
-                bandwidth = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
-                self.waterfall.set_scan_columns(centers, bandwidth)
-            except Exception:
-                self.waterfall.set_range(start_mhz, stop_mhz)
-        else:
-            self.waterfall.set_range(start_mhz, stop_mhz)
+        self.waterfall.set_range(start_mhz, stop_mhz)
+
+    def _sync_visual_mode(self):
+        scanner_mode = self._get_current_mode() == "list_scan"
+        show_waterfall = bool(self.chk_waterfall.isChecked())
+        self.waterfall.setVisible(show_waterfall and not scanner_mode)
+        self.scanner_grid.setVisible(show_waterfall and scanner_mode)
+
+    def _expected_bins_for_bandwidth_hz(self, bandwidth_hz):
+        fft_size = int(self.fft_combo.currentText())
+        bw = max(1e3, float(bandwidth_hz))
+        keep_ratio = max(1e-3, min(1.0, bw / float(self.server_sample_rate_hz)))
+        margin = int((1 - keep_ratio) / 2 * fft_size)
+        return max(1, fft_size - (2 * margin))
+
+    def _route_scan_data_to_tiles(self, data):
+        if not data:
+            return
+        channels = [ch for ch in self._collect_scan_channels() if ch["active"]]
+        if not channels:
+            return
+        expected = [self._expected_bins_for_bandwidth_hz(ch["bandwidth_mhz"] * 1e6) for ch in channels]
+        total_expected = sum(expected)
+        pos = 0
+        tile_iter = [tile for tile in self.scan_channel_tiles if tile.active_check.isChecked()]
+        for idx, tile in enumerate(tile_iter):
+            bins = expected[idx]
+            if idx == len(tile_iter) - 1:
+                segment = data[pos:]
+            else:
+                segment = data[pos:pos + bins]
+            pos += bins
+            if segment:
+                tile.consume_spectrum(segment)
+        if total_expected > len(data):
+            # Om servern skickar färre punkter än beräknat använder vi det som finns.
+            return
 
     def _build_settings_payload(self):
         payload = {
@@ -805,14 +1037,21 @@ class MainWindow(QMainWindow):
             payload["center"] = center_mhz * 1e6
             payload["bandwidth"] = bandwidth_mhz * 1e6
         elif payload["mode"] == "list_scan":
-            centers_mhz = self._parse_scan_centers_mhz()
-            if not centers_mhz:
-                raise ValueError("Minst en frekvens krävs i scannerlista")
-            bandwidth_mhz = max(0.001, self._parse_float(self.scan_bandwidth_input.text()))
+            channels = self._collect_scan_channels()
+            if not any(ch["active"] for ch in channels):
+                raise ValueError("Minst en aktiv scannerkanal krävs")
             dwell_ms = max(1.0, self._parse_float(self.scan_dwell_input.text()))
-            payload["scan_centers"] = [v * 1e6 for v in centers_mhz]
-            payload["bandwidth"] = bandwidth_mhz * 1e6
             payload["dwell_time"] = dwell_ms / 1000.0
+            payload["scan_channels"] = [
+                {
+                    "center": ch["center_mhz"] * 1e6,
+                    "bandwidth": ch["bandwidth_mhz"] * 1e6,
+                    "active": ch["active"],
+                    "auto_noise": ch["auto_noise"],
+                    "noise_reduction_db": ch["noise_reduction_db"],
+                }
+                for ch in channels
+            ]
         else:
             start_mhz = self._parse_float(self.start_input.text())
             stop_mhz = self._parse_float(self.stop_input.text())

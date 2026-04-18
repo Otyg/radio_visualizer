@@ -39,11 +39,14 @@ state = {
     "center": 98e6,
     "bandwidth": 20e6,
     "scan_centers": [98e6],
+    "scan_channels": [
+        {"center": 98e6, "bandwidth": 2.4e6, "active": True, "auto_noise": False, "noise_reduction_db": -35.0}
+    ],
     "dwell_time": 0.08,
     "fft_size": 1024,
     "step_size": 1.5e6,
     "sample_rate": 2.4e6,
-    "paused": False,
+    "paused": True,
 }
 
 
@@ -71,11 +74,46 @@ def _sanitize_frequency_list(values, fallback):
     return out
 
 
+def _sanitize_scan_channels(values, fallback):
+    if not isinstance(values, list):
+        return [dict(ch) for ch in fallback]
+    out = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        center = item.get("center")
+        bandwidth = item.get("bandwidth")
+        if center is None or bandwidth is None:
+            continue
+        try:
+            center = float(center)
+            bandwidth = float(bandwidth)
+        except Exception:
+            continue
+        if bandwidth <= 0:
+            continue
+        out.append(
+            {
+                "center": center,
+                "bandwidth": bandwidth,
+                "active": bool(item.get("active", True)),
+                "auto_noise": bool(item.get("auto_noise", False)),
+                "noise_reduction_db": float(item.get("noise_reduction_db", -35.0)),
+            }
+        )
+    if not out:
+        return [dict(ch) for ch in fallback]
+    return out
+
+
 def _update_state_from_payload(data):
+    mode_changed = False
+
     if "mode" in data:
         mode = str(data["mode"]).strip().lower()
-        if mode in ("sweep", "fixed", "list_scan"):
+        if mode in ("sweep", "fixed", "list_scan") and mode != state.get("mode"):
             state["mode"] = mode
+            mode_changed = True
 
     if "fft_size" in data:
         state["fft_size"] = max(64, int(data["fft_size"]))
@@ -97,6 +135,21 @@ def _update_state_from_payload(data):
 
     if "scan_centers" in data:
         state["scan_centers"] = _sanitize_frequency_list(data["scan_centers"], state["scan_centers"])
+        # Bakåtkompatibilitet: bygg kanallista från centers om ny struktur saknas.
+        if "scan_channels" not in data:
+            state["scan_channels"] = [
+                {
+                    "center": center,
+                    "bandwidth": float(state.get("bandwidth", 2.4e6)),
+                    "active": True,
+                    "auto_noise": False,
+                    "noise_reduction_db": -35.0,
+                }
+                for center in state["scan_centers"]
+            ]
+
+    if "scan_channels" in data:
+        state["scan_channels"] = _sanitize_scan_channels(data["scan_channels"], state["scan_channels"])
 
     if "dwell_time" in data:
         state["dwell_time"] = _sanitize_positive(data["dwell_time"], state["dwell_time"])
@@ -106,6 +159,9 @@ def _update_state_from_payload(data):
 
     if "paused" in data:
         state["paused"] = bool(data["paused"])
+    elif mode_changed:
+        # Modebyte ska inte börja köra automatiskt.
+        state["paused"] = True
 
 
 def get_clean_spectrum(samples, fft_size, visible_bw, sample_rate):
@@ -164,12 +220,20 @@ async def sdr_handler(websocket):
                     get_clean_spectrum(samples, state["fft_size"], bandwidth, state["sample_rate"])
                 )
             elif mode == "list_scan":
-                centers = _sanitize_frequency_list(state.get("scan_centers", []), [float(state["center"])])
-                bandwidth = min(float(state["bandwidth"]), float(state["sample_rate"]))
+                channels = _sanitize_scan_channels(
+                    state.get("scan_channels", []),
+                    [{"center": float(state["center"]), "bandwidth": float(state["bandwidth"]), "active": True, "auto_noise": False, "noise_reduction_db": -35.0}],
+                )
+                active_channels = [ch for ch in channels if bool(ch.get("active", True))]
+                if not active_channels:
+                    await asyncio.sleep(0.05)
+                    continue
                 dwell_time = max(0.001, float(state.get("dwell_time", 0.08)))
-                for center in centers:
+                for channel in active_channels:
                     if shutdown_event.is_set():
                         break
+                    center = float(channel["center"])
+                    bandwidth = min(float(channel["bandwidth"]), float(state["sample_rate"]))
                     sdr.center_freq = center
                     await asyncio.sleep(dwell_time)
                     samples = sdr.read_samples(state["fft_size"])
