@@ -26,11 +26,44 @@ class FrequencyRuler(QWidget):
         self.setFixedHeight(35)
         self.start_f = 88.0
         self.stop_f = 108.0
-        self.margin = 40 
+        self.margin = 40
+        self.mode = "continuous"
+        self.scan_channels = []
 
     def set_range(self, start_mhz, stop_mhz):
         self.start_f = start_mhz
         self.stop_f = stop_mhz
+        self.mode = "continuous"
+        self.scan_channels = []
+        self.update()
+
+    def set_scan_channels(self, channels):
+        active = [dict(ch) for ch in channels if bool(ch.get("active", False))]
+        if not active:
+            active = [dict(ch) for ch in channels]
+        normalized = []
+        for idx, ch in enumerate(active):
+            try:
+                center = float(ch.get("center_mhz"))
+                bandwidth = max(0.001, float(ch.get("bandwidth_mhz")))
+            except Exception:
+                continue
+            label = str(ch.get("label", "")).strip() or f"Kanal {idx + 1}"
+            normalized.append(
+                {
+                    "label": label,
+                    "center_mhz": center,
+                    "bandwidth_mhz": bandwidth,
+                }
+            )
+        if normalized:
+            self.mode = "scan_channels"
+            self.scan_channels = normalized
+            self.start_f = min(ch["center_mhz"] - (ch["bandwidth_mhz"] / 2.0) for ch in normalized)
+            self.stop_f = max(ch["center_mhz"] + (ch["bandwidth_mhz"] / 2.0) for ch in normalized)
+        else:
+            self.mode = "continuous"
+            self.scan_channels = []
         self.update()
 
     def paintEvent(self, event):
@@ -44,14 +77,34 @@ class FrequencyRuler(QWidget):
         painter.setPen(QPen(Qt.white, 1))
         painter.setFont(QFont("Arial", 9))
 
+        if self.mode == "scan_channels" and self.scan_channels:
+            total_bw = sum(ch["bandwidth_mhz"] for ch in self.scan_channels)
+            if total_bw <= 0:
+                return
+            x_cursor = float(self.margin)
+            for idx, ch in enumerate(self.scan_channels):
+                frac = ch["bandwidth_mhz"] / total_bw
+                width_px = width_draw_area * frac
+                x0 = int(round(x_cursor))
+                x1 = int(round(x_cursor + width_px))
+                x_cursor += width_px
+
+                painter.drawLine(x0, 22, x0, 32)
+                if idx == len(self.scan_channels) - 1:
+                    painter.drawLine(self.margin + width_draw_area, 22, self.margin + width_draw_area, 32)
+
+                label_rect = QRect(x0 + 2, 2, max(1, x1 - x0 - 4), 20)
+                painter.drawText(label_rect, Qt.AlignCenter, f"{ch['center_mhz']:.3f}")
+            return
+
         num_ticks = 10
         f_range = self.stop_f - self.start_f
-        
+
         for i in range(num_ticks):
             fraction = i / (num_ticks - 1)
             freq_mhz = self.start_f + (fraction * f_range)
             x = int(self.margin + (fraction * width_draw_area))
-            
+
             painter.drawLine(x, 22, x, 32)
             text = f"{freq_mhz:.1f}" if f_range < 50 else f"{int(freq_mhz)}"
             rect = QRect(x - 25, 2, 50, 20)
@@ -1002,7 +1055,10 @@ class MainWindow(QMainWindow):
             start_mhz, stop_mhz = self._get_current_range_mhz()
         except Exception:
             return
-        self.ruler.set_range(start_mhz, stop_mhz)
+        if self._get_current_mode() == "list_scan":
+            self.ruler.set_scan_channels(self._collect_scan_channels())
+        else:
+            self.ruler.set_range(start_mhz, stop_mhz)
         self.spectrum_line.set_range(start_mhz, stop_mhz)
         self.waterfall.set_range(start_mhz, stop_mhz)
 
