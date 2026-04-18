@@ -7,7 +7,7 @@ import argparse
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget, QMessageBox, QGridLayout, QFrame)
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen
-from PySide6.QtCore import Qt, Signal, Slot, QRect
+from PySide6.QtCore import Qt, Signal, Slot, QRect, QTimer
 
 import websockets
 
@@ -854,6 +854,21 @@ class MainWindow(QMainWindow):
         self._apply_current_range_to_visuals()
         self.waterfall.frequency_selected.connect(self.on_frequency_selected)
         self._sync_visual_mode()
+        QTimer.singleShot(0, self._fit_window_to_screen)
+
+    def _fit_window_to_screen(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+
+        width = min(self.width(), avail.width())
+        height = min(self.height(), avail.height())
+        self.resize(max(640, width), max(480, height))
+
+        x = min(max(self.x(), avail.left()), avail.right() - self.width() + 1)
+        y = min(max(self.y(), avail.top()), avail.bottom() - self.height() + 1)
+        self.move(x, y)
 
     @Slot(int)
     def on_threshold_changed(self, value):
