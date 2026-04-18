@@ -890,7 +890,7 @@ class MainWindow(QMainWindow):
         scanner_mode = self._get_current_mode() == "list_scan"
         if self.auto_noise_enabled and not scanner_mode:
             self._update_auto_noise_threshold(data)
-        if self.chk_spectrum.isChecked():
+        if self.chk_spectrum.isChecked() and not scanner_mode:
             self.spectrum_line.set_data(data)
         if scanner_mode:
             self._process_scanner_frame(data)
@@ -1196,7 +1196,14 @@ class MainWindow(QMainWindow):
     def _process_scanner_frame(self, data):
         routed = self._route_scan_data_to_tiles(data)
         if not routed:
+            if self.chk_spectrum.isChecked():
+                self.spectrum_line.set_data(b"")
             return
+
+        # Återgå till tidigare beteende: rita alltid kanalernas vattenfall i scannerläget.
+        if self.chk_waterfall.isChecked():
+            for tile, segment in routed:
+                tile.consume_spectrum(segment)
 
         if self.scan_lock_tile_index is not None:
             locked_pair = None
@@ -1205,16 +1212,21 @@ class MainWindow(QMainWindow):
                     locked_pair = (tile, segment)
                     break
             if locked_pair is None:
+                if self.chk_spectrum.isChecked():
+                    self.spectrum_line.set_data(b"")
                 self._unlock_scanner()
                 return
             tile, segment = locked_pair
             has_signal = tile.detect_signal(segment)
             if has_signal:
                 self.scan_unlock_miss_count = 0
-                if self.chk_waterfall.isChecked():
-                    tile.consume_spectrum(segment)
+                if self.chk_spectrum.isChecked():
+                    # Visa "infångad ljudvåg" (den låsta kanalens spektruminnehåll).
+                    self.spectrum_line.set_data(segment)
                 return
             self.scan_unlock_miss_count += 1
+            if self.chk_spectrum.isChecked():
+                self.spectrum_line.set_data(b"")
             if self.scan_unlock_miss_count >= self.scan_unlock_miss_frames:
                 self._unlock_scanner()
             return
@@ -1232,6 +1244,8 @@ class MainWindow(QMainWindow):
         if best_tile is None:
             self.scan_lock_streak_tile_index = None
             self.scan_lock_hit_count = 0
+            if self.chk_spectrum.isChecked():
+                self.spectrum_line.set_data(b"")
             return
 
         if self.scan_lock_streak_tile_index == best_tile.index:
@@ -1242,11 +1256,10 @@ class MainWindow(QMainWindow):
 
         if self.scan_lock_hit_count >= self.scan_lock_hit_frames:
             self._lock_scanner_to_tile(best_tile)
-            # Första visuella uppdateringen sker när låset är etablerat.
-            if self.chk_waterfall.isChecked():
+            if self.chk_spectrum.isChecked():
                 for tile, segment in routed:
                     if tile.index == best_tile.index:
-                        tile.consume_spectrum(segment)
+                        self.spectrum_line.set_data(segment)
                         break
 
     def _build_settings_payload(self):
