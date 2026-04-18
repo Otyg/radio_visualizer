@@ -300,6 +300,8 @@ class ScanChannelTile(QFrame):
         super().__init__()
         self.index = int(index)
         self.auto_noise_estimate = None
+        self.is_scanning_now = False
+        self.is_locked_now = False
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("QFrame { background-color: #1b1b1b; border: 1px solid #3b3b3b; border-radius: 4px; }")
 
@@ -341,11 +343,16 @@ class ScanChannelTile(QFrame):
         self.noise_db_input = QLineEdit("-35")
         self.noise_db_input.setFixedWidth(56)
         row2.addWidget(self.noise_db_input)
+        row2.addWidget(QLabel("Status:"))
+        self.scan_status_lamp = QLabel("")
+        self.scan_status_lamp.setFixedSize(12, 12)
+        row2.addWidget(self.scan_status_lamp)
         row2.addStretch()
         layout.addLayout(row2)
 
         self.waterfall = MiniWaterfallWidget()
         layout.addWidget(self.waterfall, 1)
+        self.set_scan_status(False, False)
 
     def _on_toggle_auto_noise(self, enabled):
         if enabled:
@@ -463,6 +470,19 @@ class ScanChannelTile(QFrame):
             return
         threshold = self._current_threshold(data)
         self.waterfall.add_line(data, threshold)
+
+    def set_scan_status(self, scanning, locked):
+        self.is_scanning_now = bool(scanning)
+        self.is_locked_now = bool(locked)
+        if self.is_locked_now:
+            color = "#ffd24a"
+        elif self.is_scanning_now:
+            color = "#58d26a"
+        else:
+            color = "#3e3e3e"
+        self.scan_status_lamp.setStyleSheet(
+            f"background-color: {color}; border: 1px solid #202020; border-radius: 6px;"
+        )
 
 class SpectrumLineWidget(QWidget):
     def __init__(self):
@@ -1192,18 +1212,28 @@ class MainWindow(QMainWindow):
         self.scan_lock_hit_count = 0
         self.scan_unlock_miss_count = 0
         self.runtime_scan_active_indices = None
+        self._set_scan_tile_indicators([], None)
+
+    def _set_scan_tile_indicators(self, routed, locked_tile_index):
+        scanned_indices = {tile.index for tile, _segment in routed}
+        for tile in self.scan_channel_tiles:
+            scanning = tile.index in scanned_indices
+            locked = scanning and (locked_tile_index is not None) and (tile.index == int(locked_tile_index))
+            tile.set_scan_status(scanning, locked)
 
     def _process_scanner_frame(self, data):
         routed = self._route_scan_data_to_tiles(data)
         if not routed:
             if self.chk_spectrum.isChecked():
                 self.spectrum_line.set_data(b"")
+            self._set_scan_tile_indicators([], self.scan_lock_tile_index)
             return
 
         # Återgå till tidigare beteende: rita alltid kanalernas vattenfall i scannerläget.
         if self.chk_waterfall.isChecked():
             for tile, segment in routed:
                 tile.consume_spectrum(segment)
+        self._set_scan_tile_indicators(routed, self.scan_lock_tile_index)
 
         if self.scan_lock_tile_index is not None:
             locked_pair = None
