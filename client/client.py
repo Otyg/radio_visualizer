@@ -3,6 +3,7 @@ import json
 import asyncio
 import threading
 import math
+import time
 import argparse
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QPushButton, QLabel, QSlider, QComboBox, QCheckBox, QFileDialog, QTabWidget, QMessageBox, QGridLayout, QFrame)
@@ -409,34 +410,6 @@ class ScanChannelTile(QFrame):
             return threshold
         return self._noise_db_to_threshold()
 
-    def detect_signal(self, data):
-        if not data:
-            return False
-
-        threshold = self._current_threshold(data)
-        hist = [0] * 256
-        for value in data:
-            hist[value] += 1
-        total = len(data)
-        p50 = self._percentile_from_hist(hist, total, 50)
-        p90 = self._percentile_from_hist(hist, total, 90)
-        p99 = self._percentile_from_hist(hist, total, 99)
-
-        strong_bins = 0
-        elevated_limit = min(255, threshold + 6)
-        for value in data:
-            if value >= elevated_limit:
-                strong_bins += 1
-        strong_ratio = float(strong_bins) / float(total)
-
-        peak_margin = p99 - max(p50, threshold)
-        return (
-            p99 >= (threshold + 8)
-            and p90 >= (threshold + 3)
-            and peak_margin >= 10
-            and strong_ratio >= 0.015
-        )
-
     def get_config(self):
         freq_mhz = self._parse_float(self.freq_input.text(), 100.0)
         bandwidth_mhz = max(0.001, self._parse_float(self.bandwidth_input.text(), 0.2))
@@ -658,13 +631,9 @@ class MainWindow(QMainWindow):
             default_scan_dwell_ms = 80.0
         self.scan_channel_count = 15
         self.server_sample_rate_hz = 2.4e6
-        self.scan_lock_tile_index = None
-        self.scan_lock_streak_tile_index = None
-        self.scan_lock_hit_count = 0
-        self.scan_unlock_miss_count = 0
-        self.scan_lock_hit_frames = 2
-        self.scan_unlock_miss_frames = 3
         self.runtime_scan_active_indices = None
+        self.scan_listen_tile_index = None
+        self.scan_last_switch_ts = time.monotonic()
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -928,6 +897,8 @@ class MainWindow(QMainWindow):
         if self.chk_spectrum.isChecked() and not scanner_mode:
             self.spectrum_line.set_data(data)
         if scanner_mode:
+            if self.chk_spectrum.isChecked():
+                self.spectrum_line.set_data(b"")
             self._process_scanner_frame(data)
             return
         if self.chk_waterfall.isChecked():
@@ -985,7 +956,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def on_mode_tab_changed(self, _index):
-        self._reset_scan_lock()
+        self._reset_scan_state()
         self._sync_visual_mode()
         self._apply_current_range_to_visuals()
         if self.mode_tabs.currentIndex() == 0:
@@ -1208,104 +1179,50 @@ class MainWindow(QMainWindow):
         asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
         self._send_pause_state()
 
-    def _lock_scanner_to_tile(self, tile):
-        if tile is None:
-            return
-        self.scan_lock_tile_index = tile.index
-        self.scan_unlock_miss_count = 0
-        self._send_scan_channels_to_server({tile.index})
-
-    def _unlock_scanner(self):
-        self.scan_lock_tile_index = None
-        self.scan_unlock_miss_count = 0
-        active_indices = {tile.index for tile in self.scan_channel_tiles if tile.active_check.isChecked()}
-        self._send_scan_channels_to_server(active_indices)
-
-    def _reset_scan_lock(self):
-        self.scan_lock_tile_index = None
-        self.scan_lock_streak_tile_index = None
-        self.scan_lock_hit_count = 0
-        self.scan_unlock_miss_count = 0
+    def _reset_scan_state(self):
         self.runtime_scan_active_indices = None
-        self._set_scan_tile_indicators([], None)
+        self.scan_listen_tile_index = None
+        self.scan_last_switch_ts = time.monotonic()
+        self._set_scan_tile_indicators(None)
 
-    def _set_scan_tile_indicators(self, routed, locked_tile_index):
-        scanned_indices = {tile.index for tile, _segment in routed}
+    def _update_scan_listen_tile_index(self, routed):
+        ordered_indices = [tile.index for tile, _segment in routed]
+        if not ordered_indices:
+            self.scan_listen_tile_index = None
+            return None
+
+        now = time.monotonic()
+        dwell_sec = max(0.001, self._parse_float(self.scan_dwell_input.text()) / 1000.0)
+        if self.scan_listen_tile_index not in ordered_indices:
+            self.scan_listen_tile_index = ordered_indices[0]
+            self.scan_last_switch_ts = now
+            return self.scan_listen_tile_index
+
+        elapsed = max(0.0, now - self.scan_last_switch_ts)
+        steps = int(elapsed / dwell_sec)
+        if steps > 0:
+            curr_pos = ordered_indices.index(self.scan_listen_tile_index)
+            next_pos = (curr_pos + steps) % len(ordered_indices)
+            self.scan_listen_tile_index = ordered_indices[next_pos]
+            self.scan_last_switch_ts += steps * dwell_sec
+        return self.scan_listen_tile_index
+
+    def _set_scan_tile_indicators(self, listen_tile_index):
         for tile in self.scan_channel_tiles:
-            scanning = tile.index in scanned_indices
-            locked = scanning and (locked_tile_index is not None) and (tile.index == int(locked_tile_index))
-            tile.set_scan_status(scanning, locked)
+            tile.set_scan_status(tile.index == listen_tile_index, False)
 
     def _process_scanner_frame(self, data):
         routed = self._route_scan_data_to_tiles(data)
         if not routed:
-            if self.chk_spectrum.isChecked():
-                self.spectrum_line.set_data(b"")
-            self._set_scan_tile_indicators([], self.scan_lock_tile_index)
+            self._set_scan_tile_indicators(None)
             return
 
-        # Återgå till tidigare beteende: rita alltid kanalernas vattenfall i scannerläget.
+        # Rita alltid kanalernas vattenfall i scannerläget.
         if self.chk_waterfall.isChecked():
             for tile, segment in routed:
                 tile.consume_spectrum(segment)
-        self._set_scan_tile_indicators(routed, self.scan_lock_tile_index)
-
-        if self.scan_lock_tile_index is not None:
-            locked_pair = None
-            for tile, segment in routed:
-                if tile.index == self.scan_lock_tile_index:
-                    locked_pair = (tile, segment)
-                    break
-            if locked_pair is None:
-                if self.chk_spectrum.isChecked():
-                    self.spectrum_line.set_data(b"")
-                self._unlock_scanner()
-                return
-            tile, segment = locked_pair
-            has_signal = tile.detect_signal(segment)
-            if has_signal:
-                self.scan_unlock_miss_count = 0
-                if self.chk_spectrum.isChecked():
-                    # Visa "infångad ljudvåg" (den låsta kanalens spektruminnehåll).
-                    self.spectrum_line.set_data(segment)
-                return
-            self.scan_unlock_miss_count += 1
-            if self.chk_spectrum.isChecked():
-                self.spectrum_line.set_data(b"")
-            if self.scan_unlock_miss_count >= self.scan_unlock_miss_frames:
-                self._unlock_scanner()
-            return
-
-        best_tile = None
-        best_peak = -1
-        for tile, segment in routed:
-            if not tile.detect_signal(segment):
-                continue
-            peak = max(segment)
-            if peak > best_peak:
-                best_peak = peak
-                best_tile = tile
-
-        if best_tile is None:
-            self.scan_lock_streak_tile_index = None
-            self.scan_lock_hit_count = 0
-            if self.chk_spectrum.isChecked():
-                self.spectrum_line.set_data(b"")
-            return
-
-        if self.scan_lock_streak_tile_index == best_tile.index:
-            self.scan_lock_hit_count += 1
-        else:
-            self.scan_lock_streak_tile_index = best_tile.index
-            self.scan_lock_hit_count = 1
-
-        if self.scan_lock_hit_count >= self.scan_lock_hit_frames:
-            self._lock_scanner_to_tile(best_tile)
-            if self.chk_spectrum.isChecked():
-                for tile, segment in routed:
-                    if tile.index == best_tile.index:
-                        self.spectrum_line.set_data(segment)
-                        break
+        listen_tile_index = self._update_scan_listen_tile_index(routed)
+        self._set_scan_tile_indicators(listen_tile_index)
 
     def _build_settings_payload(self):
         payload = {
@@ -1379,7 +1296,7 @@ class MainWindow(QMainWindow):
 
     def send_settings(self):
         try:
-            self._reset_scan_lock()
+            self._reset_scan_state()
             payload = self._build_settings_payload()
             self._apply_current_range_to_visuals()
             if self.ws:
