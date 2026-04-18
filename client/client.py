@@ -254,9 +254,13 @@ class ScanChannelTile(QFrame):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        title = QLabel(f"Kanal {self.index + 1}")
-        title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(title)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(4)
+        name_row.addWidget(QLabel("Namn:"))
+        self.name_input = QLineEdit(f"Kanal {self.index + 1}")
+        self.name_input.setPlaceholderText("Kanalnamn")
+        name_row.addWidget(self.name_input, 1)
+        layout.addLayout(name_row)
 
         row1 = QHBoxLayout()
         row1.setSpacing(4)
@@ -333,11 +337,16 @@ class ScanChannelTile(QFrame):
             self.auto_noise_estimate = 0.70 * self.auto_noise_estimate + 0.30 * raw_target
         return int(round(self.auto_noise_estimate))
 
+    @staticmethod
+    def _threshold_to_noise_db(threshold):
+        return (float(threshold) / 3.0) - 60.0
+
     def get_config(self):
         freq_mhz = self._parse_float(self.freq_input.text(), 100.0)
         bandwidth_mhz = max(0.001, self._parse_float(self.bandwidth_input.text(), 0.2))
         noise_reduction_db = self._parse_float(self.noise_db_input.text(), -35.0)
         return {
+            "label": self.name_input.text().strip() or f"Kanal {self.index + 1}",
             "center_mhz": freq_mhz,
             "bandwidth_mhz": bandwidth_mhz,
             "active": bool(self.active_check.isChecked()),
@@ -348,6 +357,9 @@ class ScanChannelTile(QFrame):
     def set_config(self, cfg):
         if not isinstance(cfg, dict):
             return
+        label = str(cfg.get("label", "")).strip()
+        if label:
+            self.name_input.setText(label)
         freq_mhz = self._parse_float(cfg.get("center_mhz", self.freq_input.text()), self.freq_input.text())
         bandwidth_mhz = max(0.001, self._parse_float(cfg.get("bandwidth_mhz", self.bandwidth_input.text()), self.bandwidth_input.text()))
         noise_reduction_db = self._parse_float(cfg.get("noise_reduction_db", self.noise_db_input.text()), self.noise_db_input.text())
@@ -360,7 +372,12 @@ class ScanChannelTile(QFrame):
     def consume_spectrum(self, data):
         if not data:
             return
-        threshold = self._estimate_auto_threshold(data) if self.auto_noise_check.isChecked() else self._noise_db_to_threshold()
+        if self.auto_noise_check.isChecked():
+            threshold = self._estimate_auto_threshold(data)
+            noise_db = self._threshold_to_noise_db(threshold)
+            self.noise_db_input.setText(f"{noise_db:.1f}")
+        else:
+            threshold = self._noise_db_to_threshold()
         self.waterfall.add_line(data, threshold)
 
 class SpectrumLineWidget(QWidget):
@@ -529,9 +546,9 @@ class MainWindow(QMainWindow):
         default_bandwidth = abs(stop_mhz - start_mhz) if bandwidth_mhz is None else float(bandwidth_mhz)
         if default_bandwidth <= 0:
             default_bandwidth = max(0.1, float(step_mhz))
-        default_scan_bandwidth = default_bandwidth if scan_bandwidth_mhz is None else float(scan_bandwidth_mhz)
+        default_scan_bandwidth = 0.25 if scan_bandwidth_mhz is None else float(scan_bandwidth_mhz)
         if default_scan_bandwidth <= 0:
-            default_scan_bandwidth = max(0.1, float(step_mhz))
+            default_scan_bandwidth = 0.25
         default_scan_dwell_ms = 80.0 if scan_dwell_ms is None else float(scan_dwell_ms)
         if default_scan_dwell_ms <= 0:
             default_scan_dwell_ms = 80.0
